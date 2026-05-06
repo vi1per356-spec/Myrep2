@@ -109,6 +109,7 @@ _LX = {
         'btn_clear_hashtags': "🗑 Очистити хештеги",
         'btn_bot_on':         "▶️ Увімкнути бот",
         'btn_bot_off':        "⏹ Вимкнути бот",
+        'btn_playwright':     "🎭 Playwright режим",
         'country_title':      "🌍 Виберіть країну:",
         'country_set':        "✅ Країну встановлено: {v}",
         'ask_comment':        "💬 Введіть основний коментар (одне повідомлення):",
@@ -180,6 +181,7 @@ _LX = {
         'btn_clear_hashtags': "🗑 Clear hashtags",
         'btn_bot_on':         "▶️ Enable bot",
         'btn_bot_off':        "⏹ Disable bot",
+        'btn_playwright':     "🎭 Playwright mode",
         'country_title':      "🌍 Select country:",
         'country_set':        "✅ Country set: {v}",
         'ask_comment':        "💬 Enter the main comment (one message):",
@@ -251,6 +253,7 @@ _LX = {
         'btn_clear_hashtags': "🗑 Очистить хэштеги",
         'btn_bot_on':         "▶️ Включить бот",
         'btn_bot_off':        "⏹ Отключить бот",
+        'btn_playwright':     "🎭 Playwright режим",
         'country_title':      "🌍 Выберите страну:",
         'country_set':        "✅ Страна установлена: {v}",
         'ask_comment':        "💬 Введите основной комментарий (одно сообщение):",
@@ -885,6 +888,9 @@ def _params_markup(uid: int) -> types.InlineKeyboardMarkup:
     bot_btn_key = 'btn_bot_off' if bot_active else 'btn_bot_on'
     markup.add(
         types.InlineKeyboardButton(_LT(uid, bot_btn_key), callback_data="tiktok_toggle_bot")
+    )
+    markup.add(
+        types.InlineKeyboardButton(_LT(uid, 'btn_playwright'), callback_data="tiktok_pw_panel")
     )
     markup.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data="m_manage_tiktok"))
     return markup
