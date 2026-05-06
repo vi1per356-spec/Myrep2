@@ -430,6 +430,18 @@ def _normalize_cookie_input(raw_text: str) -> list:
     return [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
 
+def _extract_uid_from_cookie_str(cookie_str: str) -> str:
+    """Return numeric user-id from cookie string, or '' if not found."""
+    for part in cookie_str.split(';'):
+        part = part.strip()
+        if '=' not in part:
+            continue
+        k, _, v = part.partition('=')
+        if k.strip() in ('uid', 'uid_tt', 'uid_tt_ss'):
+            return v.strip()
+    return ''
+
+
 # ─── TikTok API helpers ───────────────────────────────────────────────────────
 
 def _make_session(cookie_str: str = '', proxy_str: str = '') -> requests.Session:
@@ -505,15 +517,19 @@ def _get_tt_info(cookie_str: str, proxy_str: str = '') -> tuple:
                     unique_id = u.get('unique_id') or u.get('username') or '?'
                     if unique_id != '?':
                         return True, nickname, unique_id
-                    # Account exists but nickname/uid not returned — treat as valid
-                    # with a placeholder so it can still be stored
-                    return True, u.get('email', 'TikTok'), 'user'
         except Exception:
             pass
 
-        # Fallback 3: session is present but all API checks failed
-        # Mark as added-but-unverified (active=False shows ❌ in list)
-        return False, '?', 'unknown'
+        # Fallback 3: session key present but all API calls failed.
+        # Try to extract the numeric uid from the cookie string (the 'uid'
+        # or 'uid_tt' cookie) so we can at least show something real.
+        uid_from_cookie = _extract_uid_from_cookie_str(cookie_str)
+        if uid_from_cookie:
+            return True, '—', uid_from_cookie
+
+        # Nothing worked but session key is present → account is likely valid,
+        # just profile info is unavailable (regional API / missing cookies).
+        return True, '—', '?'
     except Exception:
         return False, '?', 'unknown'
 
@@ -1128,6 +1144,7 @@ def register_callbacks(bot):
             _pending_login_step.pop(uid, None)
 
             # Delegate to Playwright login (runs in background thread)
+            _pw_error = None
             try:
                 import ruklaTikTok as _rtt
                 wait_msg = bot.send_message(
@@ -1145,10 +1162,24 @@ def register_callbacks(bot):
                     wait_msg_id  = wait_msg.message_id,
                 )
                 return   # thread handles everything from here
-            except ImportError:
+            except Exception as _pw_error:
                 pass
 
-            # ── fallback if ruklaTikTok is unavailable ────────────────────
+            # ── Playwright недоступний — показати причину ─────────────────
+            if _pw_error is not None:
+                bot.send_message(
+                    uid,
+                    "⚠️ <b>Playwright недоступний</b>\n\n"
+                    f"<code>{type(_pw_error).__name__}: {_pw_error}</code>\n\n"
+                    "Встановіть:\n"
+                    "<code>pip install playwright playwright-stealth\n"
+                    "playwright install chromium</code>\n\n"
+                    "Або додайте акаунт через <b>Cookie</b>.",
+                    parse_mode='HTML',
+                )
+                return
+
+            # ── аварійний fallback (не має досягатися в нормальній роботі) ─
             wait_msg = bot.send_message(uid, _LT(uid, 'login_checking'))
             ok, cookie_str, nickname, unique_id = _try_tt_login(username, password)
 
