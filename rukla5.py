@@ -2,20 +2,33 @@
 rukla5.py — TikTok advertising module
 
 Features:
-  - SOCKS5 proxy per account
-  - Add accounts via Cookie or Login/Password
-  - Country/geo selection
-  - Main comment + up to 4 replies
+  - Add accounts via Cookie (multi-line)
+  - Single-column inline menus
+  - Account deletion: single index / range "2-5" / "all"
+  - Global SOCKS5 proxy list with same delete semantics; round-robin assignment
   - Hashtag monitoring with background worker
-  - Bot on/off toggle
-  - Account/proxy purchase (delegates to rukla7)
+  - Main message + 1.5 min between posts; new videos prioritised over old
+  - Reply styles (2-5 accounts respond per main comment, up to 15 styles)
+  - Like-on-everything: parent comment, own comment/reply, and the video
+  - Display-name distribution across accounts (1 nick → ~N/M accounts)
+  - Avatar ZIP upload (PNG/JPG/JPEG/WEBP); ~50 % accounts get a random avatar
+  - Neuro-feed: scroll FYP, like every 2nd, AI-comment every 4th (provider hook)
+  - Bot state toggle (pause / resume)
 """
 
+from __future__ import annotations
+
+import io
 import json
 import os
+import random
 import re
+import shutil
 import threading
 import time
+import zipfile
+from typing import Optional
+
 import requests
 from telebot import types
 
@@ -23,272 +36,196 @@ from telebot import types
 TIKTOK_ACCOUNTS_FILE  = 'tiktok_accounts.json'
 TIKTOK_SETTINGS_FILE  = 'tiktok_settings.json'
 TIKTOK_COMMENTED_FILE = 'tiktok_commented.json'
+TIKTOK_AVATARS_ROOT   = 'tiktok_avatars'   # one sub-dir per uid
 
-# ─── Bot reference (set in register_callbacks) ────────────────────────────────
+# ─── Bot reference ────────────────────────────────────────────────────────────
 _bot_ref = None
 
 # ─── In-memory state ──────────────────────────────────────────────────────────
-_accounts: dict  = {}   # uid_str -> [{cookie, active, nickname, unique_id, proxy}]
-_settings: dict  = {}   # uid_str -> {country, main_comment, replies, hashtags, bot_active}
-_commented: dict = {}   # uid_str -> {hashtag_clean -> [video_id, ...]}
+_accounts:  dict = {}   # uid_str -> [acc, ...]
+_settings:  dict = {}   # uid_str -> {settings dict}
+_commented: dict = {}   # uid_str -> {hashtag -> [video_id, ...]}
 
-# ─── Pending input trackers ───────────────────────────────────────────────────
-_pending_cookie_input: set = set()          # waiting for cookie text
-_pending_login_step:  dict = {}             # uid -> {'step':'user'|'pass', 'username':str}
-_pending_proxy_input: dict = {}             # uid -> acc_idx (int)
-_pending_text_input:  dict = {}             # uid -> 'comment'|'replies'|'hashtags'
+# ─── Pending input ────────────────────────────────────────────────────────────
+# uid -> action key (string).  All flows feed into one message handler.
+_pending: dict = {}
 
-# ─── Background workers ───────────────────────────────────────────────────────
-_bg_stop:   dict = {}   # uid -> threading.Event
-_bg_thread: dict = {}   # uid -> threading.Thread
+ACT_COOKIE       = 'cookie'
+ACT_PROXY_ADD    = 'proxy_add'
+ACT_PROXY_DEL    = 'proxy_del'
+ACT_ACC_DEL      = 'acc_del'
+ACT_HASHTAGS     = 'hashtags'
+ACT_NICKS        = 'nicks'
+ACT_AVATARS      = 'avatars'        # waiting for ZIP document
+ACT_MAIN_MSG     = 'main_msg'
+ACT_REPLY_STYLES = 'reply_styles'
 
-# ─── Countries ────────────────────────────────────────────────────────────────
+# ─── Background workers ──────────────────────────────────────────────────────
+_bg_stop:      dict = {}   # uid -> threading.Event   (main comment worker)
+_bg_thread:    dict = {}
+_neuro_stop:   dict = {}   # uid -> threading.Event   (neuro-feed worker)
+_neuro_thread: dict = {}
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+COMMENT_DELAY_SECS = 90       # 1.5 minutes between main comments
+ACCOUNT_LIMIT      = 25
+REPLY_STYLE_LIMIT  = 15
+DEFAULT_REPLY_MIN  = 2
+DEFAULT_REPLY_MAX  = 5
+NO_AVATAR_PCT      = 50
+
 COUNTRIES = [
     "🇺🇦 Україна",        "🇵🇱 Польща",           "🇨🇿 Чехія",
-    "🇸🇰 Словаччина",     "🇭🇺 Угорщина",          "🇷🇴 Румунія",
-    "🇧🇬 Болгарія",       "🇦🇹 Австрія",            "🇨🇭 Швейцарія",
-    "🇩🇪 Німеччина",      "🇫🇷 Франція",            "🇪🇸 Іспанія",
-    "🇵🇹 Португалія",     "🇮🇹 Італія",             "🇳🇱 Нідерланди",
+    "🇸🇰 Словаччина",     "🇭🇺 Угорщина",         "🇷🇴 Румунія",
+    "🇧🇬 Болгарія",       "🇦🇹 Австрія",           "🇨🇭 Швейцарія",
+    "🇩🇪 Німеччина",      "🇫🇷 Франція",           "🇪🇸 Іспанія",
+    "🇵🇹 Португалія",     "🇮🇹 Італія",            "🇳🇱 Нідерланди",
     "🇬🇧 Велика Британія","🇺🇸 США",                "🇨🇦 Канада",
     "🇦🇺 Австралія",
 ]
 
-# ─── Local translations ───────────────────────────────────────────────────────
+# ─── Translations (UK is full; EN/RU map to selected keys, UK fallback) ──────
 _LX = {
     'uk': {
-        'acc_header':         "📱 <b>Акаунти TikTok</b>\n\nСписок акаунтів:",
-        'no_accs':            "Жодного акаунту не додано.",
-        'btn_cookie':         "➕ Додати через Cookie",
-        'btn_login':          "➕ Додати через Логін/Пароль",
-        'btn_buy_acc':        "📱 Купити акаунти",
-        'btn_buy_proxy':      "🌍 Купити проксі",
-        'btn_set_proxy_i':    "🔒 Проксі №{i}",
-        'btn_del_acc_i':      "🗑 Видалити №{i}",
-        'ask_cookie':         (
-            "📋 Надішліть Cookie рядок(и) для TikTok акаунту.\n"
-            "Кожен акаунт — з окремого рядка."
-        ),
-        'ask_login_user':     "👤 Введіть логін (email або username) TikTok акаунту:",
-        'ask_login_pass':     "🔑 Введіть пароль TikTok акаунту:",
-        'btn_cancel':         "⬅️ Скасувати",
-        'checking':           "⏳ Перевіряю акаунт(и)...",
-        'login_checking':     "⏳ Спроба входу...",
-        'added_ok':           "✅ Додано: {n}",
-        'added_fail':         "❌ Не вдалося (перевірте cookie): {n}",
-        'login_ok':           "✅ Акаунт <b>{nick}</b> (@{uid}) додано",
-        'login_fail':         (
-            "❌ Не вдалося увійти. Перевірте логін/пароль або "
-            "спробуйте через Cookie."
-        ),
-        'ask_proxy':          (
-            "🌐 Введіть SOCKS5 проксі для акаунту №{i}:\n"
-            "<code>socks5://host:port</code>\n"
-            "або\n"
-            "<code>socks5://user:pass@host:port</code>\n\n"
-            "Введіть <b>-</b> щоб видалити поточний проксі."
-        ),
-        'proxy_set':          "✅ Проксі встановлено для акаунту №{i}",
-        'proxy_removed':      "✅ Проксі видалено для акаунту №{i}",
-        'proxy_invalid':      "❌ Невірний формат. Введіть socks5://... або - для видалення.",
-        'acc_deleted':        "✅ Акаунт №{i} видалено",
-        'acc_not_found':      "❌ Акаунт не знайдено",
-        'limit_hit':          "⚠️ Досягнуто ліміт у 25 акаунтів",
-        'params_header':      "⚙️ <b>Параметри TikTok реклами</b>",
-        'params_country':     "🌍 Країна: <b>{v}</b>",
-        'params_comment':     "💬 Коментар: <b>{v}</b>",
-        'params_replies':     "📝 Відповіді: <b>{v}</b>",
-        'params_hashtags':    "🔖 Хештеги: <b>{v}</b>",
-        'params_bot':         "🤖 Стан боту: <b>{v}</b>",
-        'params_bot_on':      "✅ Активний",
-        'params_bot_off':     "❌ Вимкнений",
-        'params_none':        "не встановлено",
-        'btn_set_country':    "🌍 Вибрати країну",
-        'btn_set_comment':    "💬 Встановити коментар",
-        'btn_set_replies':    "📝 Встановити відповіді (4)",
-        'btn_add_hashtags':   "🔖 Встановити хештеги",
-        'btn_clear_hashtags': "🗑 Очистити хештеги",
-        'btn_bot_on':         "▶️ Увімкнути бот",
-        'btn_bot_off':        "⏹ Вимкнути бот",
-        'btn_playwright':     "🎭 Playwright режим",
-        'country_title':      "🌍 Виберіть країну:",
-        'country_set':        "✅ Країну встановлено: {v}",
-        'ask_comment':        "💬 Введіть основний коментар (одне повідомлення):",
-        'comment_set':        "✅ Основний коментар встановлено",
-        'ask_replies':        (
-            "📝 Введіть до 4 відповідей — кожна з <b>нового рядка</b>.\n"
-            "(якщо менше 4 — решта буде порожньою)"
-        ),
-        'replies_set':        "✅ Відповіді встановлено ({n}/4)",
-        'ask_hashtags':       "🔖 Введіть хештеги через кому або з нового рядка (без #):",
-        'hashtags_set':       "✅ Хештеги встановлено: {v}",
-        'hashtags_cleared':   "✅ Хештеги очищено",
-        'bot_enabled':        "✅ Бот увімкнено! Починаю моніторинг хештегів...",
-        'bot_disabled':       "⏹ Бот вимкнено",
-        'bot_need_setup':     "⚠️ Спочатку встановіть коментар та хештеги",
-        'bot_no_acc':         "⚠️ Немає активних акаунтів. Додайте або перевірте акаунт.",
-        'bot_already_on':     "ℹ️ Бот вже запущено",
+        # accounts menu
+        'acc_header':     "📱 <b>Акаунти TikTok</b>\n\nСписок акаунтів:",
+        'no_accs':        "Жодного акаунту не додано.",
+        'btn_cookie':     "➕ Додати акаунт (Cookie)",
+        'btn_buy_acc':    "📱 Купити акаунти",
+        'btn_buy_proxy':  "🌍 Купити проксі",
+        'btn_proxy':      "🌐 Керувати проксі",
+        'btn_del_acc':    "🗑 Видалити акаунти",
+        'btn_params':     "⚙️ Керувати параметрами реклами",
+        # cookie input
+        'ask_cookie':     ("📋 Надішліть Cookie рядок(и) для TikTok акаунту.\n"
+                           "Кожен акаунт — з окремого рядка."),
+        'checking':       "⏳ Перевіряю акаунт(и)...",
+        'added_ok':       "✅ Додано: {n}",
+        'added_fail':     "❌ Не вдалося (перевірте cookie): {n}",
+        'added_dup':      "↩️ Пропущено дублікатів: {n}",
+        'limit_hit':      "⚠️ Досягнуто ліміт у {lim} акаунтів",
+        # account / proxy delete
+        'ask_del_acc':    ("🗑 Введіть, кого видалити:\n"
+                           "• <b>1</b> — один акаунт за номером\n"
+                           "• <b>2-5</b> — діапазон\n"
+                           "• <b>all</b> — всі акаунти"),
+        'del_ok_n':       "✅ Видалено: {n}",
+        'del_range_err':  "❌ Невірний діапазон. Приклад: 2-5",
+        'acc_not_found':  "❌ Акаунт не знайдено",
+        # proxy menu
+        'proxy_header':   "🌐 <b>SOCKS5 проксі</b>\n\nСписок проксі (round-robin до акаунтів):",
+        'no_proxies':     "Жодного проксі не додано.",
+        'btn_proxy_add':  "➕ Додати проксі",
+        'btn_proxy_del':  "🗑 Видалити проксі",
+        'ask_proxy_add':  ("🌐 Надішліть SOCKS5 проксі — кожен з нового рядка:\n"
+                           "<code>socks5://host:port</code>\n"
+                           "<code>socks5://user:pass@host:port</code>"),
+        'proxy_added_n':  "✅ Додано проксі: {n}",
+        'proxy_invalid_n':"❌ Пропущено невірних: {n}",
+        'ask_del_proxy':  ("🗑 Введіть, які проксі видалити:\n"
+                           "• <b>1</b> — один проксі за номером\n"
+                           "• <b>2-4</b> — діапазон\n"
+                           "• <b>all</b> — всі проксі"),
+        'proxy_not_found':"❌ Проксі не знайдено",
+        # params menu
+        'params_header':  "⚙️ <b>Параметри реклами TikTok</b>",
+        'p_country':      "🌍 Країна: <b>{v}</b>",
+        'p_hashtags':     "🔖 Хештеги: <b>{v}</b>",
+        'p_nicks':        "📝 Нікнейми: <b>{v}</b>",
+        'p_avatars':      "👥 Аватарки: <b>{v}</b>",
+        'p_main':         "📕 Основне повідомлення: <b>{v}</b>",
+        'p_replies':      "📗 Відповіді: <b>{v}</b>",
+        'p_neuro':        "🖲 Нейроперегляд: <b>{v}</b>",
+        'p_state':        "🤔 Стан боту: <b>{v}</b>",
+        'on_str':         "✅ Увімкнено",
+        'off_str':        "⏹ Вимкнено",
+        'none_str':       "не встановлено",
+        'btn_set_country':"🌍 Вибрати країну",
+        'btn_add_hashtag':"➕ Додати хештег",
+        'btn_set_nicks':  "📝 Змінити Nickname",
+        'btn_set_avatar': "👥 Змінити аватарки",
+        'btn_set_main':   "📕 Змінити текст основного повідомлення",
+        'btn_set_reply':  "📗 Змінити текст додаткових повідомлень",
+        'btn_neuro':      "🖲 Нейроперегляд",
+        'btn_state':      "🤔 Стан боту",
+        'btn_back':       "⬅️ Назад",
+        'btn_cancel':     "⬅️ Скасувати",
+        'country_title':  "🌍 Виберіть країну:",
+        'country_set':    "✅ Країну встановлено: {v}",
+        # text inputs
+        'ask_hashtags':   ("🔖 Введіть хештеги (без #), через кому або з нового рядка.\n"
+                           "Бот буде моніторити нові та старі відео під ними."),
+        'hashtags_set':   "✅ Хештеги: {v}",
+        'ask_nicks':      ("📝 Надішліть до 25 нікнеймів — кожен з нового рядка.\n"
+                           "Вони будуть рівномірно розподілені на акаунти."),
+        'nicks_set':      "✅ Нікнеймів збережено: {n}",
+        'ask_avatars':    ("👥 Надішліть <b>ZIP-архів</b> з аватарками "
+                           "(PNG/JPG/JPEG/WEBP).\n"
+                           f"~{NO_AVATAR_PCT}% акаунтів залишаться без аватарки."),
+        'avatars_set':    "✅ Завантажено {n} аватарок. Призначено випадково на {a} акаунтів.",
+        'avatars_zip_err':"❌ Не вдалося розпакувати ZIP. Перевірте файл.",
+        'avatars_empty':  "❌ В архіві немає підтримуваних зображень.",
+        'ask_main':       ("📕 Введіть текст основного повідомлення.\n"
+                           "Воно буде надіслане під кожне відео з затримкою 1,5 хв "
+                           "між постами; нові відео обробляються першими."),
+        'main_set':       "✅ Основне повідомлення збережено",
+        'ask_reply':      (f"📗 Надішліть до {REPLY_STYLE_LIMIT} стилів відповідей — "
+                           "кожен з <b>нового рядка</b>.\n"
+                           "На кожне основне повідомлення відповідатимуть "
+                           f"{DEFAULT_REPLY_MIN}-{DEFAULT_REPLY_MAX} акаунтів випадковими стилями."),
+        'reply_set':      "✅ Стилів відповідей збережено: {n}",
+        'neuro_on':       "✅ Нейроперегляд увімкнено",
+        'neuro_off':      "⏹ Нейроперегляд вимкнено",
+        'state_on':       "✅ Бот працює — продовжую розсилку",
+        'state_off':      "⏹ Бот зупинено",
+        # bot toggle errors
+        'need_main':      "⚠️ Спочатку встановіть основне повідомлення",
+        'need_hashtags':  "⚠️ Спочатку додайте хештеги",
+        'need_acc':       "⚠️ Немає активних акаунтів",
     },
     'en': {
-        'acc_header':         "📱 <b>TikTok Accounts</b>\n\nAccount list:",
-        'no_accs':            "No accounts added.",
-        'btn_cookie':         "➕ Add via Cookie",
-        'btn_login':          "➕ Add via Login/Password",
-        'btn_buy_acc':        "📱 Buy accounts",
-        'btn_buy_proxy':      "🌍 Buy proxies",
-        'btn_set_proxy_i':    "🔒 Proxy №{i}",
-        'btn_del_acc_i':      "🗑 Delete №{i}",
-        'ask_cookie':         (
-            "📋 Send Cookie string(s) for TikTok account.\n"
-            "One account per line."
-        ),
-        'ask_login_user':     "👤 Enter TikTok login (email or username):",
-        'ask_login_pass':     "🔑 Enter TikTok account password:",
-        'btn_cancel':         "⬅️ Cancel",
-        'checking':           "⏳ Checking account(s)...",
-        'login_checking':     "⏳ Attempting login...",
-        'added_ok':           "✅ Added: {n}",
-        'added_fail':         "❌ Failed (check cookie): {n}",
-        'login_ok':           "✅ Account <b>{nick}</b> (@{uid}) added",
-        'login_fail':         (
-            "❌ Login failed. Check credentials or try via Cookie."
-        ),
-        'ask_proxy':          (
-            "🌐 Enter SOCKS5 proxy for account №{i}:\n"
-            "<code>socks5://host:port</code>\n"
-            "or\n"
-            "<code>socks5://user:pass@host:port</code>\n\n"
-            "Enter <b>-</b> to remove current proxy."
-        ),
-        'proxy_set':          "✅ Proxy set for account №{i}",
-        'proxy_removed':      "✅ Proxy removed for account №{i}",
-        'proxy_invalid':      "❌ Invalid format. Use socks5://... or - to remove.",
-        'acc_deleted':        "✅ Account №{i} deleted",
-        'acc_not_found':      "❌ Account not found",
-        'limit_hit':          "⚠️ 25 account limit reached",
-        'params_header':      "⚙️ <b>TikTok Ad Parameters</b>",
-        'params_country':     "🌍 Country: <b>{v}</b>",
-        'params_comment':     "💬 Comment: <b>{v}</b>",
-        'params_replies':     "📝 Replies: <b>{v}</b>",
-        'params_hashtags':    "🔖 Hashtags: <b>{v}</b>",
-        'params_bot':         "🤖 Bot status: <b>{v}</b>",
-        'params_bot_on':      "✅ Active",
-        'params_bot_off':     "❌ Inactive",
-        'params_none':        "not set",
-        'btn_set_country':    "🌍 Select country",
-        'btn_set_comment':    "💬 Set main comment",
-        'btn_set_replies':    "📝 Set replies (4)",
-        'btn_add_hashtags':   "🔖 Set hashtags",
-        'btn_clear_hashtags': "🗑 Clear hashtags",
-        'btn_bot_on':         "▶️ Enable bot",
-        'btn_bot_off':        "⏹ Disable bot",
-        'btn_playwright':     "🎭 Playwright mode",
-        'country_title':      "🌍 Select country:",
-        'country_set':        "✅ Country set: {v}",
-        'ask_comment':        "💬 Enter the main comment (one message):",
-        'comment_set':        "✅ Main comment set",
-        'ask_replies':        (
-            "📝 Enter up to 4 replies — each on a <b>new line</b>.\n"
-            "(fewer than 4 is OK — the rest will be empty)"
-        ),
-        'replies_set':        "✅ Replies set ({n}/4)",
-        'ask_hashtags':       "🔖 Enter hashtags separated by comma or new line (without #):",
-        'hashtags_set':       "✅ Hashtags set: {v}",
-        'hashtags_cleared':   "✅ Hashtags cleared",
-        'bot_enabled':        "✅ Bot enabled! Starting hashtag monitoring...",
-        'bot_disabled':       "⏹ Bot disabled",
-        'bot_need_setup':     "⚠️ Set comment and hashtags first",
-        'bot_no_acc':         "⚠️ No active accounts. Add or check an account.",
-        'bot_already_on':     "ℹ️ Bot is already running",
+        'acc_header':     "📱 <b>TikTok Accounts</b>\n\nAccount list:",
+        'no_accs':        "No accounts added.",
+        'btn_cookie':     "➕ Add account (Cookie)",
+        'btn_buy_acc':    "📱 Buy accounts",
+        'btn_buy_proxy':  "🌍 Buy proxies",
+        'btn_proxy':      "🌐 Manage proxies",
+        'btn_del_acc':    "🗑 Delete accounts",
+        'btn_params':     "⚙️ Ad parameters",
+        'btn_back':       "⬅️ Back",
+        'btn_cancel':     "⬅️ Cancel",
     },
     'ru': {
-        'acc_header':         "📱 <b>Аккаунты TikTok</b>\n\nСписок аккаунтов:",
-        'no_accs':            "Аккаунтов нет.",
-        'btn_cookie':         "➕ Добавить через Cookie",
-        'btn_login':          "➕ Добавить через Логин/Пароль",
-        'btn_buy_acc':        "📱 Купить аккаунты",
-        'btn_buy_proxy':      "🌍 Купить прокси",
-        'btn_set_proxy_i':    "🔒 Прокси №{i}",
-        'btn_del_acc_i':      "🗑 Удалить №{i}",
-        'ask_cookie':         (
-            "📋 Отправьте Cookie строку(и) для TikTok аккаунта.\n"
-            "Каждый аккаунт — с новой строки."
-        ),
-        'ask_login_user':     "👤 Введите логин (email или username) TikTok:",
-        'ask_login_pass':     "🔑 Введите пароль TikTok аккаунта:",
-        'btn_cancel':         "⬅️ Отмена",
-        'checking':           "⏳ Проверяю аккаунт(ы)...",
-        'login_checking':     "⏳ Попытка входа...",
-        'added_ok':           "✅ Добавлено: {n}",
-        'added_fail':         "❌ Ошибка (проверьте cookie): {n}",
-        'login_ok':           "✅ Аккаунт <b>{nick}</b> (@{uid}) добавлен",
-        'login_fail':         (
-            "❌ Не удалось войти. Проверьте логин/пароль или используйте Cookie."
-        ),
-        'ask_proxy':          (
-            "🌐 Введите SOCKS5 прокси для аккаунта №{i}:\n"
-            "<code>socks5://host:port</code>\n"
-            "или\n"
-            "<code>socks5://user:pass@host:port</code>\n\n"
-            "Введите <b>-</b> для удаления прокси."
-        ),
-        'proxy_set':          "✅ Прокси установлен для аккаунта №{i}",
-        'proxy_removed':      "✅ Прокси удалён для аккаунта №{i}",
-        'proxy_invalid':      "❌ Неверный формат. Используйте socks5://... или - для удаления.",
-        'acc_deleted':        "✅ Аккаунт №{i} удалён",
-        'acc_not_found':      "❌ Аккаунт не найден",
-        'limit_hit':          "⚠️ Лимит 25 аккаунтов достигнут",
-        'params_header':      "⚙️ <b>Параметры TikTok рекламы</b>",
-        'params_country':     "🌍 Страна: <b>{v}</b>",
-        'params_comment':     "💬 Комментарий: <b>{v}</b>",
-        'params_replies':     "📝 Ответы: <b>{v}</b>",
-        'params_hashtags':    "🔖 Хэштеги: <b>{v}</b>",
-        'params_bot':         "🤖 Статус бота: <b>{v}</b>",
-        'params_bot_on':      "✅ Активен",
-        'params_bot_off':     "❌ Отключён",
-        'params_none':        "не задано",
-        'btn_set_country':    "🌍 Выбрать страну",
-        'btn_set_comment':    "💬 Установить комментарий",
-        'btn_set_replies':    "📝 Установить ответы (4)",
-        'btn_add_hashtags':   "🔖 Установить хэштеги",
-        'btn_clear_hashtags': "🗑 Очистить хэштеги",
-        'btn_bot_on':         "▶️ Включить бот",
-        'btn_bot_off':        "⏹ Отключить бот",
-        'btn_playwright':     "🎭 Playwright режим",
-        'country_title':      "🌍 Выберите страну:",
-        'country_set':        "✅ Страна установлена: {v}",
-        'ask_comment':        "💬 Введите основной комментарий (одно сообщение):",
-        'comment_set':        "✅ Основной комментарий установлен",
-        'ask_replies':        (
-            "📝 Введите до 4 ответов — каждый с <b>новой строки</b>.\n"
-            "(меньше 4 — оставшиеся будут пустыми)"
-        ),
-        'replies_set':        "✅ Ответы установлены ({n}/4)",
-        'ask_hashtags':       "🔖 Введите хэштеги через запятую или новую строку (без #):",
-        'hashtags_set':       "✅ Хэштеги установлены: {v}",
-        'hashtags_cleared':   "✅ Хэштеги очищены",
-        'bot_enabled':        "✅ Бот включён! Начинаю мониторинг хэштегов...",
-        'bot_disabled':       "⏹ Бот отключён",
-        'bot_need_setup':     "⚠️ Сначала установите комментарий и хэштеги",
-        'bot_no_acc':         "⚠️ Нет активных аккаунтов. Добавьте или проверьте аккаунт.",
-        'bot_already_on':     "ℹ️ Бот уже запущен",
+        'acc_header':     "📱 <b>Аккаунты TikTok</b>\n\nСписок аккаунтов:",
+        'no_accs':        "Аккаунтов нет.",
+        'btn_cookie':     "➕ Добавить аккаунт (Cookie)",
+        'btn_buy_acc':    "📱 Купить аккаунты",
+        'btn_buy_proxy':  "🌍 Купить прокси",
+        'btn_proxy':      "🌐 Управление прокси",
+        'btn_del_acc':    "🗑 Удалить аккаунты",
+        'btn_params':     "⚙️ Параметры рекламы",
+        'btn_back':       "⬅️ Назад",
+        'btn_cancel':     "⬅️ Отмена",
     },
 }
 
-# ─── Translation helpers ──────────────────────────────────────────────────────
 
-def _LT(uid: int, key: str) -> str:
-    """Local translation for TikTok-specific texts."""
+def _lang(uid: int) -> str:
     try:
         import rukla as _r
-        lang = _r.get_user_data(uid).get('lang', 'uk')
+        return _r.get_user_data(uid).get('lang', 'uk')
     except Exception:
-        lang = 'uk'
-    texts = _LX.get(lang, _LX['uk'])
-    return texts.get(key, _LX['uk'].get(key, key))
+        return 'uk'
+
+
+def _LT(uid: int, key: str) -> str:
+    """Local translation; falls back to UK."""
+    lang = _lang(uid)
+    return _LX.get(lang, _LX['uk']).get(key, _LX['uk'].get(key, key))
 
 
 def _T(uid: int, key: str) -> str:
-    """Proxy to rukla.T for shared keys (b_back, etc.)."""
+    """Proxy to global rukla.T for shared keys (b_back, etc.)."""
     try:
         import rukla as _r
         return _r.T(uid, key)
@@ -296,143 +233,127 @@ def _T(uid: int, key: str) -> str:
         return key
 
 
-# ─── Persistence ─────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+#  Persistence
+# ════════════════════════════════════════════════════════════════════════════
 
-def _load_accounts():
+def _load_json(path: str, default):
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default
+
+
+def _save_json(path: str, data) -> None:
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_accounts() -> None:
     global _accounts
-    if os.path.exists(TIKTOK_ACCOUNTS_FILE):
-        with open(TIKTOK_ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            _accounts = json.load(f)
-    else:
-        _accounts = {}
+    _accounts = _load_json(TIKTOK_ACCOUNTS_FILE, {})
 
 
-def _save_accounts():
-    with open(TIKTOK_ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_accounts, f, ensure_ascii=False, indent=2)
+def _save_accounts() -> None:
+    _save_json(TIKTOK_ACCOUNTS_FILE, _accounts)
 
 
-def _load_settings():
+def _load_settings() -> None:
     global _settings
-    if os.path.exists(TIKTOK_SETTINGS_FILE):
-        with open(TIKTOK_SETTINGS_FILE, 'r', encoding='utf-8') as f:
-            _settings = json.load(f)
-    else:
-        _settings = {}
+    _settings = _load_json(TIKTOK_SETTINGS_FILE, {})
 
 
-def _save_settings():
-    with open(TIKTOK_SETTINGS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_settings, f, ensure_ascii=False, indent=2)
+def _save_settings() -> None:
+    _save_json(TIKTOK_SETTINGS_FILE, _settings)
 
 
-def _load_commented():
+def _load_commented() -> None:
     global _commented
-    if os.path.exists(TIKTOK_COMMENTED_FILE):
-        with open(TIKTOK_COMMENTED_FILE, 'r', encoding='utf-8') as f:
-            _commented = json.load(f)
-    else:
-        _commented = {}
+    _commented = _load_json(TIKTOK_COMMENTED_FILE, {})
 
 
-def _save_commented():
-    with open(TIKTOK_COMMENTED_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_commented, f, ensure_ascii=False, indent=2)
+def _save_commented() -> None:
+    _save_json(TIKTOK_COMMENTED_FILE, _commented)
 
 
-def _load_all():
-    _load_accounts()
-    _load_settings()
-    _load_commented()
+def _load_all() -> None:
+    _load_accounts(); _load_settings(); _load_commented()
 
 
 def _get_user_accounts(uid: int) -> list:
     return _accounts.get(str(uid), [])
 
 
-def _set_user_accounts(uid: int, accounts: list):
-    _accounts[str(uid)] = accounts
+def _set_user_accounts(uid: int, accs: list) -> None:
+    _accounts[str(uid)] = accs
     _save_accounts()
+
+
+def _default_settings() -> dict:
+    return {
+        'country':       '',
+        'hashtags':      [],
+        'nicknames':     [],
+        'avatars':       [],            # list of file paths under TIKTOK_AVATARS_ROOT/<uid>/
+        'main_message':  '',
+        'reply_styles':  [],            # up to REPLY_STYLE_LIMIT strings
+        'reply_min':     DEFAULT_REPLY_MIN,
+        'reply_max':     DEFAULT_REPLY_MAX,
+        'proxies':       [],            # ['socks5://...', ...]
+        'neuro_active':  False,
+        'bot_active':    True,          # pause/resume — defaults ON
+    }
 
 
 def _get_user_settings(uid: int) -> dict:
     uid_str = str(uid)
     if uid_str not in _settings:
-        _settings[uid_str] = {
-            'country': '',
-            'main_comment': '',
-            'replies': ['', '', '', ''],
-            'hashtags': [],
-            'bot_active': False,
-        }
+        _settings[uid_str] = _default_settings()
+    else:
+        # Ensure forward-compat keys
+        defaults = _default_settings()
+        for k, v in defaults.items():
+            _settings[uid_str].setdefault(k, v)
     return _settings[uid_str]
 
 
-def _save_user_settings(uid: int):
-    _save_settings()
+def _clear_pending(uid: int) -> None:
+    _pending.pop(uid, None)
 
 
-# ─── Pending state helpers ────────────────────────────────────────────────────
-
-def _clear_pending(uid: int):
-    """Clear all pending input states for a user."""
-    _pending_cookie_input.discard(uid)
-    _pending_login_step.pop(uid, None)
-    _pending_proxy_input.pop(uid, None)
-    _pending_text_input.pop(uid, None)
-
-
-# ─── TikTok headers ──────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+#  TikTok API helpers
+# ════════════════════════════════════════════════════════════════════════════
 
 _TT_HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Safari/537.36'
-    ),
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/124.0.0.0 Safari/537.36'),
     'Referer': 'https://www.tiktok.com/',
     'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
     'Accept': 'application/json, text/plain, */*',
 }
 
 
-# ─── Cookie normalisation ─────────────────────────────────────────────────────
-
-def _normalize_cookie_input(raw_text: str) -> list:
-    """
-    Accept any common cookie format and return a list of plain
-    'key=value; key2=value2' strings (one string = one account).
-
-    Supported inputs:
-      • JSON array   [{"name":"sessionid","value":"abc",...}, ...]
-        (exported by EditThisCookie, Cookie-Editor, etc.)
-      • Plain string  sessionid=abc; uid=123; ...
-      • Multiple plain strings, one per line (several accounts at once)
-    """
-    raw_text = raw_text.strip()
-
-    # ── JSON array (one or more cookies for a single account) ──────────────
-    if raw_text.startswith('['):
+def _normalize_cookie_input(raw: str) -> list:
+    raw = raw.strip()
+    if raw.startswith('['):
         try:
-            items = json.loads(raw_text)
-            parts = []
-            for item in items:
-                name  = item.get('name', '')
-                value = item.get('value', '')
-                if name:
-                    parts.append(f"{name}={value}")
-            result = '; '.join(parts)
-            return [result] if result else []
+            items = json.loads(raw)
+            parts = [f"{i.get('name','')}={i.get('value','')}"
+                     for i in items if i.get('name')]
+            joined = '; '.join(parts)
+            return [joined] if joined else []
         except (json.JSONDecodeError, AttributeError):
-            pass  # fall through to plain-string handling
-
-    # ── Plain string(s), one per line ──────────────────────────────────────
-    return [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+            pass
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
 
-def _extract_uid_from_cookie_str(cookie_str: str) -> str:
-    """Return numeric user-id from cookie string, or '' if not found."""
-    for part in cookie_str.split(';'):
+def _extract_uid_from_cookie(cookie: str) -> str:
+    for part in cookie.split(';'):
         part = part.strip()
         if '=' not in part:
             continue
@@ -442,310 +363,319 @@ def _extract_uid_from_cookie_str(cookie_str: str) -> str:
     return ''
 
 
-# ─── TikTok API helpers ───────────────────────────────────────────────────────
-
-def _make_session(cookie_str: str = '', proxy_str: str = '') -> requests.Session:
-    """Create a requests.Session with TikTok cookies and optional SOCKS5 proxy."""
+def _make_session(cookie: str = '', proxy: str = '') -> requests.Session:
     s = requests.Session()
     s.headers.update(_TT_HEADERS)
-    if cookie_str:
-        for part in cookie_str.split(';'):
+    if cookie:
+        for part in cookie.split(';'):
             part = part.strip()
             if '=' in part:
                 k, v = part.split('=', 1)
                 s.cookies.set(k.strip(), v.strip(), domain='.tiktok.com')
-    if proxy_str and proxy_str.startswith('socks5://'):
-        s.proxies.update({'http': proxy_str, 'https': proxy_str})
+    if proxy and proxy.startswith('socks5://'):
+        s.proxies.update({'http': proxy, 'https': proxy})
     return s
 
 
-def _get_tt_info(cookie_str: str, proxy_str: str = '') -> tuple:
-    """Check TikTok cookie validity. Returns (valid, nickname, unique_id)."""
+def _get_tt_info(cookie: str, proxy: str = '') -> tuple:
+    """Returns (valid, nickname, unique_id)."""
     try:
-        # Accept sessionid, sid_guard or sessionid_ss as valid session markers
-        _SESSION_KEYS = ('sessionid', 'sid_guard', 'sessionid_ss')
-        if not any(k in cookie_str for k in _SESSION_KEYS):
+        if not any(k in cookie for k in ('sessionid', 'sid_guard', 'sessionid_ss')):
             return False, '?', 'unknown'
-        s = _make_session(cookie_str, proxy_str)
+        s = _make_session(cookie, proxy)
 
-        # Primary endpoint
-        resp = s.get(
+        for endpoint in (
             'https://www.tiktok.com/passport/web/account/info/',
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-                if data.get('statusCode') == 0 or data.get('status_code') == 0:
-                    user = data.get('data', data.get('user', {}))
-                    nickname  = user.get('nickname') or user.get('name') or '?'
-                    unique_id = user.get('unique_id') or user.get('uniqueId') or '?'
-                    if unique_id != '?':
-                        return True, nickname, unique_id
-            except Exception:
-                pass
-
-        # Fallback endpoint
-        resp2 = s.get(
             'https://www.tiktok.com/api/user/detail/',
-            params={'uniqueId': '', 'secUid': ''},
-            timeout=10,
-        )
-        if resp2.status_code == 200:
+        ):
             try:
-                d  = resp2.json()
-                ui = d.get('userInfo', {}).get('user', {})
-                nickname  = ui.get('nickname') or '?'
-                unique_id = ui.get('uniqueId') or '?'
-                if unique_id != '?':
-                    return True, nickname, unique_id
+                resp = s.get(endpoint, timeout=10)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                user = (data.get('data') or
+                        data.get('user') or
+                        data.get('userInfo', {}).get('user') or
+                        {})
+                nick = user.get('nickname') or user.get('display_name') or '?'
+                uid_  = (user.get('unique_id') or user.get('uniqueId') or
+                         user.get('username') or '?')
+                if uid_ != '?':
+                    return True, nick, uid_
             except Exception:
                 pass
 
-        # Fallback 2: /passport/web/account/info/ with different headers
-        try:
-            resp3 = s.get(
-                'https://www.tiktok.com/passport/web/account/info/',
-                headers={'Referer': 'https://www.tiktok.com/'},
-                timeout=10,
-            )
-            if resp3.status_code == 200:
-                d3 = resp3.json()
-                if d3.get('data'):
-                    u = d3['data']
-                    nickname  = u.get('nickname') or u.get('display_name') or '?'
-                    unique_id = u.get('unique_id') or u.get('username') or '?'
-                    if unique_id != '?':
-                        return True, nickname, unique_id
-        except Exception:
-            pass
-
-        # Fallback 3: session key present but all API calls failed.
-        # Try to extract the numeric uid from the cookie string (the 'uid'
-        # or 'uid_tt' cookie) so we can at least show something real.
-        uid_from_cookie = _extract_uid_from_cookie_str(cookie_str)
-        if uid_from_cookie:
-            return True, '—', uid_from_cookie
-
-        # Nothing worked but session key is present → account is likely valid,
-        # just profile info is unavailable (regional API / missing cookies).
+        from_cookie = _extract_uid_from_cookie(cookie)
+        if from_cookie:
+            return True, '—', from_cookie
         return True, '—', '?'
     except Exception:
         return False, '?', 'unknown'
 
 
-def _try_tt_login(username: str, password: str) -> tuple:
-    """
-    Best-effort TikTok login via username/password.
-    Returns (success, cookie_str, nickname, unique_id).
-    Note: TikTok has heavy bot-detection; this may fail frequently.
-    """
+def _post_comment(session: requests.Session, video_id: str,
+                  text: str, parent_cid: str = '') -> tuple:
+    """Returns (success, comment_id)."""
     try:
-        s = requests.Session()
-        s.headers.update(_TT_HEADERS)
-        # Seed session cookies
-        s.get('https://www.tiktok.com/', timeout=10)
-
-        payload = {
-            'username': username,
-            'password': password,
-            'mix_mode': '1',
-            'multi_login': '1',
-            'aid': '1988',
+        data = {
+            'aweme_id': video_id,
+            'text': text,
+            'is_self_see': '0',
         }
-        resp = s.post(
-            'https://www.tiktok.com/passport/web/user/login/',
-            data=payload,
-            timeout=15,
-        )
+        if parent_cid:
+            data['reply_id'] = parent_cid
+        resp = session.post('https://www.tiktok.com/api/comment/publish/',
+                            data=data, timeout=15)
         if resp.status_code == 200:
-            try:
-                data = resp.json()
-                # Success indicators vary by TikTok version
-                if (
-                    data.get('message') == 'success'
-                    or data.get('data', {}).get('redirect_url')
-                    or data.get('status_code') == 0
-                ):
-                    cookie_str = '; '.join(
-                        f"{c.name}={c.value}" for c in s.cookies
-                    )
-                    if 'sessionid' in cookie_str:
-                        valid, nickname, unique_id = _get_tt_info(cookie_str)
-                        if valid:
-                            return True, cookie_str, nickname, unique_id
-            except Exception:
-                pass
-        return False, '', '?', 'unknown'
-    except Exception:
-        return False, '', '?', 'unknown'
-
-
-def _parse_cookie_dict(cookie_str: str) -> dict:
-    result = {}
-    for part in cookie_str.split(';'):
-        part = part.strip()
-        if '=' in part:
-            k, v = part.split('=', 1)
-            result[k.strip()] = v.strip()
-    return result
-
-
-def _get_hashtag_id(hashtag_clean: str, session: requests.Session) -> str:
-    """Fetch TikTok challenge ID for a hashtag name."""
-    try:
-        resp = session.get(
-            'https://www.tiktok.com/api/challenge/detail/',
-            params={'challengeName': hashtag_clean},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return (
-                data.get('challengeInfo', {})
-                    .get('challenge', {})
-                    .get('id', '')
-            )
-    except Exception:
-        pass
-    return ''
-
-
-def _fetch_hashtag_videos(
-    challenge_id: str,
-    cursor: int,
-    session: requests.Session,
-    count: int = 30,
-) -> tuple:
-    """
-    Fetch video IDs for a TikTok hashtag/challenge.
-    Returns (video_ids: list[str], next_cursor: int, has_more: bool).
-    """
-    try:
-        resp = session.get(
-            'https://www.tiktok.com/api/challenge/item_list/',
-            params={
-                'challengeID': challenge_id,
-                'count': count,
-                'cursor': cursor,
-                'type': 5,
-            },
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data.get('itemList', [])
-            video_ids = [
-                str(item.get('id') or item.get('aweme_id', ''))
-                for item in items
-            ]
-            video_ids = [v for v in video_ids if v]
-            next_cursor = int(data.get('cursor', cursor + len(items)))
-            has_more    = bool(data.get('hasMore', False))
-            return video_ids, next_cursor, has_more
-    except Exception:
-        pass
-    return [], cursor, False
-
-
-def _post_comment(
-    session: requests.Session,
-    video_id: str,
-    text: str,
-) -> tuple:
-    """
-    Post a comment on a TikTok video.
-    Returns (success: bool, comment_id: str).
-    """
-    try:
-        resp = session.post(
-            'https://www.tiktok.com/api/comment/publish/',
-            data={
-                'aweme_id': video_id,
-                'text': text,
-                'is_self_see': '0',
-            },
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('status_code') == 0:
-                comment_id = data.get('comment', {}).get('cid', '')
-                return True, comment_id
+            d = resp.json()
+            if d.get('status_code') == 0:
+                return True, d.get('comment', {}).get('cid', '')
     except Exception:
         pass
     return False, ''
 
 
-def _reply_to_comment(
-    session: requests.Session,
-    video_id: str,
-    comment_id: str,
-    text: str,
-) -> bool:
-    """
-    Reply to a TikTok comment. Returns success bool.
-    """
+def _like_video(session: requests.Session, video_id: str) -> bool:
     try:
-        resp = session.post(
-            'https://www.tiktok.com/api/comment/publish/',
-            data={
-                'aweme_id': video_id,
-                'text': text,
-                'reply_id': comment_id,
-                'is_self_see': '0',
-            },
-            timeout=15,
-        )
+        resp = session.post('https://www.tiktok.com/api/commit/digg/item/',
+                            data={'aweme_id': video_id, 'type': '1'},
+                            timeout=10)
+        return resp.status_code == 200 and resp.json().get('status_code') == 0
+    except Exception:
+        return False
+
+
+def _like_comment(session: requests.Session, video_id: str, cid: str) -> bool:
+    if not cid:
+        return False
+    try:
+        resp = session.post('https://www.tiktok.com/api/comment/digg/',
+                            data={'aweme_id': video_id, 'cid': cid,
+                                  'digg_type': '1'},
+                            timeout=10)
+        return resp.status_code == 200 and resp.json().get('status_code') == 0
+    except Exception:
+        return False
+
+
+def _get_hashtag_id(name: str, session: requests.Session) -> str:
+    try:
+        resp = session.get('https://www.tiktok.com/api/challenge/detail/',
+                           params={'challengeName': name}, timeout=10)
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get('status_code') == 0
+            d = resp.json()
+            return (d.get('challengeInfo', {})
+                     .get('challenge', {})
+                     .get('id', ''))
     except Exception:
         pass
-    return False
+    return ''
 
 
-# ─── Background worker ────────────────────────────────────────────────────────
+def _fetch_hashtag_videos(challenge_id: str, cursor: int,
+                          session: requests.Session, count: int = 30) -> tuple:
+    """Returns (items: list[dict {id, create_time}], next_cursor, has_more)."""
+    try:
+        resp = session.get('https://www.tiktok.com/api/challenge/item_list/',
+                           params={'challengeID': challenge_id, 'count': count,
+                                   'cursor': cursor, 'type': 5},
+                           timeout=10)
+        if resp.status_code == 200:
+            d = resp.json()
+            raw = d.get('itemList', [])
+            items = []
+            for it in raw:
+                vid = str(it.get('id') or it.get('aweme_id', ''))
+                if vid:
+                    items.append({'id': vid,
+                                  'create_time': int(it.get('createTime') or
+                                                     it.get('create_time') or 0)})
+            return items, int(d.get('cursor', cursor + len(items))), bool(d.get('hasMore'))
+    except Exception:
+        pass
+    return [], cursor, False
 
-def _get_active_account(uid: int) -> dict | None:
-    """Return first active account for this user, or None."""
-    for acc in _accounts.get(str(uid), []):
-        if acc.get('active', False):
-            return acc
-    return None
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Proxy parsing
+# ════════════════════════════════════════════════════════════════════════════
+
+_PROXY_RE = re.compile(r'^socks5://([^:@\s]+(?::[^@\s]+)?@)?[^:\s]+:\d+$')
 
 
-def _bg_worker(bot, uid: int, stop_evt: threading.Event):
+def _is_valid_socks5(line: str) -> bool:
+    return bool(_PROXY_RE.match(line.strip()))
+
+
+def _proxy_for_account(uid: int, idx: int) -> str:
+    """Round-robin proxy assignment from settings.proxies."""
+    s = _get_user_settings(uid)
+    proxies = s.get('proxies', [])
+    if not proxies:
+        return ''
+    return proxies[idx % len(proxies)]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Range / single / all parser  (1, 2-5, all)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _parse_range(text: str, n_total: int) -> tuple:
+    """Returns (mode, indices) where mode in {'one','range','all','err'}.
+    indices are 0-based and clamped to [0, n_total)."""
+    t = text.strip().lower()
+    if t == 'all':
+        return 'all', list(range(n_total))
+    if '-' in t:
+        try:
+            a, b = t.split('-', 1)
+            start = int(a.strip()) - 1
+            end   = int(b.strip()) - 1
+            if start > end:
+                start, end = end, start
+            indices = [i for i in range(start, end + 1) if 0 <= i < n_total]
+            return 'range', indices
+        except Exception:
+            return 'err', []
+    digits = ''.join(filter(str.isdigit, t))
+    if not digits:
+        return 'err', []
+    one = int(digits) - 1
+    if 0 <= one < n_total:
+        return 'one', [one]
+    return 'err', []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Display name / avatar distribution helpers
+# ════════════════════════════════════════════════════════════════════════════
+
+def _distribute_nicknames(uid: int) -> None:
+    """Assign settings.nicknames evenly to accounts (round-robin)."""
+    s = _get_user_settings(uid)
+    nicks = s.get('nicknames', [])
+    accs  = _get_user_accounts(uid)
+    if not nicks or not accs:
+        return
+    for i, acc in enumerate(accs):
+        acc['display_nickname'] = nicks[i % len(nicks)]
+    _set_user_accounts(uid, accs)
+
+
+def _distribute_avatars(uid: int) -> int:
+    """Assign settings.avatars to accounts; ~NO_AVATAR_PCT% get none.
+    Returns number of accounts that received an avatar."""
+    s = _get_user_settings(uid)
+    pool = list(s.get('avatars', []))
+    accs = _get_user_accounts(uid)
+    if not accs:
+        return 0
+    rnd = random.Random()
+    given = 0
+    for acc in accs:
+        if not pool:
+            acc['avatar_path'] = ''
+            continue
+        if rnd.randint(1, 100) <= NO_AVATAR_PCT:
+            acc['avatar_path'] = ''
+        else:
+            acc['avatar_path'] = rnd.choice(pool)
+            given += 1
+    _set_user_accounts(uid, accs)
+    return given
+
+
+def _avatars_dir(uid: int) -> str:
+    p = os.path.join(TIKTOK_AVATARS_ROOT, str(uid))
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
+
+
+def _extract_avatars_zip(uid: int, zip_bytes: bytes) -> list:
+    """Extract supported images from a ZIP archive, store under avatars dir.
+    Returns list of stored absolute paths."""
+    target = _avatars_dir(uid)
+    # Wipe previous avatars to keep things tidy
+    for fn in os.listdir(target):
+        try:
+            os.remove(os.path.join(target, fn))
+        except Exception:
+            pass
+    paths: list = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = os.path.basename(info.filename)
+            if not name:
+                continue
+            if not name.lower().endswith(_IMAGE_EXTS):
+                continue
+            dest = os.path.join(target, name)
+            with zf.open(info) as src, open(dest, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+            paths.append(dest)
+    return paths
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  AI hook (Neuro-feed)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _ai_comment_for_video(video_meta: dict) -> str:
+    """Generate a topical comment for a TikTok video.
+    Stub — wire to a real provider (Anthropic/OpenAI) when available.
+    Receives whatever metadata the worker has (id, description, hashtags)."""
+    desc = (video_meta.get('desc') or '').strip()
+    if desc:
+        return f"Цікаво про «{desc[:40]}» 🔥"
+    return "Топ! 🔥"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Background workers
+# ════════════════════════════════════════════════════════════════════════════
+
+def _active_accounts(uid: int) -> list:
+    return [a for a in _get_user_accounts(uid) if a.get('active', False)]
+
+
+def _bg_worker(bot, uid: int, stop_evt: threading.Event) -> None:
+    """Main comment + replies worker.
+
+    For each hashtag, fetch videos; sort by create_time DESC (newest first);
+    skip already-commented; for each new video:
+      1. Pick primary account → post main comment.
+      2. Like the video, like own comment.
+      3. Pick reply_min..reply_max OTHER accounts → each posts a random
+         reply style; likes parent comment + own reply + video.
+      4. Wait COMMENT_DELAY_SECS before next video.
     """
-    Background thread: monitors hashtags and posts comments + replies.
-    - First pass: comments on ALL existing videos.
-    - Subsequent passes (every 10 min): only new videos.
-    """
-    uid_str    = str(uid)
-    first_run  = True
+    uid_str = str(uid)
 
     while not stop_evt.is_set():
         try:
             _load_all()
-            settings = _get_user_settings(uid)
-            hashtags     = settings.get('hashtags', [])
-            main_comment = settings.get('main_comment', '')
-            replies      = settings.get('replies', ['', '', '', ''])
+            s = _get_user_settings(uid)
 
-            if not hashtags or not main_comment:
-                stop_evt.wait(300)
-                first_run = False
-                continue
+            if not s.get('bot_active', True):
+                stop_evt.wait(30); continue
 
-            acc = _get_active_account(uid)
-            if not acc:
-                stop_evt.wait(120)
-                first_run = False
-                continue
+            hashtags     = s.get('hashtags', [])
+            main_message = s.get('main_message', '')
+            styles       = s.get('reply_styles', [])
+            r_min        = max(1, int(s.get('reply_min', DEFAULT_REPLY_MIN)))
+            r_max        = max(r_min, int(s.get('reply_max', DEFAULT_REPLY_MAX)))
 
-            cookie_str = acc.get('cookie', '')
-            proxy_str  = acc.get('proxy', '')
-            session    = _make_session(cookie_str, proxy_str)
+            if not hashtags or not main_message:
+                stop_evt.wait(120); continue
+
+            actives = _active_accounts(uid)
+            if not actives:
+                stop_evt.wait(120); continue
 
             if uid_str not in _commented:
                 _commented[uid_str] = {}
@@ -753,67 +683,97 @@ def _bg_worker(bot, uid: int, stop_evt: threading.Event):
             for hashtag in hashtags:
                 if stop_evt.is_set():
                     break
-                ht_clean = hashtag.lstrip('#').strip()
-                if not ht_clean:
+                ht = hashtag.lstrip('#').strip()
+                if not ht:
                     continue
 
-                try:
-                    challenge_id = _get_hashtag_id(ht_clean, session)
-                    if not challenge_id:
+                # Use the first active account for fetching
+                lead_acc = actives[0]
+                lead_proxy = _proxy_for_account(uid, 0)
+                lead_session = _make_session(lead_acc.get('cookie', ''), lead_proxy)
+
+                cid_h = _get_hashtag_id(ht, lead_session)
+                if not cid_h:
+                    continue
+
+                seen = set(_commented[uid_str].get(ht, []))
+
+                # Collect a page of videos
+                items, _, _ = _fetch_hashtag_videos(cid_h, 0, lead_session, count=30)
+                # Newest first
+                items.sort(key=lambda x: x.get('create_time', 0), reverse=True)
+
+                for it in items:
+                    if stop_evt.is_set():
+                        break
+                    if not s.get('bot_active', True):
+                        break
+
+                    vid = it['id']
+                    if vid in seen:
                         continue
 
-                    commented_for_tag = _commented[uid_str].get(ht_clean, [])
-                    cursor   = 0
-                    has_more = True
+                    # Refresh actives each loop in case some failed
+                    actives = _active_accounts(uid)
+                    if not actives:
+                        break
 
-                    while not stop_evt.is_set() and has_more:
-                        video_ids, next_cursor, has_more = _fetch_hashtag_videos(
-                            challenge_id, cursor, session
-                        )
-                        for vid in video_ids:
+                    primary = actives[0]
+                    primary_idx = _get_user_accounts(uid).index(primary)
+                    p_session = _make_session(primary.get('cookie', ''),
+                                              _proxy_for_account(uid, primary_idx))
+                    ok, main_cid = _post_comment(p_session, vid, main_message)
+                    if not ok:
+                        # Mark as seen anyway to avoid retry loop on the same vid
+                        seen.add(vid)
+                        _commented[uid_str][ht] = list(seen)
+                        _save_commented()
+                        stop_evt.wait(5)
+                        continue
+
+                    # Like-on-success
+                    _like_video(p_session, vid)
+                    _like_comment(p_session, vid, main_cid)
+
+                    # Pick replier accounts (different from primary)
+                    others = [a for a in actives if a is not primary]
+                    if styles and others:
+                        n_replies = random.randint(r_min, r_max)
+                        n_replies = min(n_replies, len(others))
+                        repliers = random.sample(others, n_replies) if n_replies else []
+                        used_styles = random.sample(styles,
+                                                    min(len(styles), n_replies))
+                        for j, racc in enumerate(repliers):
                             if stop_evt.is_set():
                                 break
-                            if vid in commented_for_tag:
-                                # Already commented — skip on non-first run
-                                if not first_run:
-                                    continue
-                                else:
-                                    continue  # skip on first run too
+                            r_idx     = _get_user_accounts(uid).index(racc)
+                            r_session = _make_session(racc.get('cookie', ''),
+                                                      _proxy_for_account(uid, r_idx))
+                            r_text    = used_styles[j % len(used_styles)] if used_styles \
+                                        else random.choice(styles)
+                            r_ok, r_cid = _post_comment(r_session, vid, r_text,
+                                                        parent_cid=main_cid)
+                            if r_ok:
+                                _like_comment(r_session, vid, main_cid)
+                                _like_comment(r_session, vid, r_cid)
+                                _like_video(r_session, vid)
+                            stop_evt.wait(2)
 
-                            # Post main comment
-                            ok, cid = _post_comment(session, vid, main_comment)
-                            if ok:
-                                commented_for_tag.append(vid)
-                                # Post replies
-                                for reply_text in replies:
-                                    if stop_evt.is_set():
-                                        break
-                                    if reply_text and reply_text.strip():
-                                        _reply_to_comment(session, vid, cid, reply_text)
-                                        stop_evt.wait(2)  # polite delay
-                                stop_evt.wait(5)  # delay between videos
-                            else:
-                                stop_evt.wait(3)
+                    seen.add(vid)
+                    _commented[uid_str][ht] = list(seen)
+                    _save_commented()
 
-                        _commented[uid_str][ht_clean] = commented_for_tag
-                        _save_commented()
-
-                        # On subsequent runs only scan first page
-                        if not first_run:
-                            break
-                        cursor = next_cursor
-
-                except Exception:
-                    pass  # Continue to next hashtag on error
+                    # 1.5 min between main comments — but new videos have priority,
+                    # so we re-poll the hashtag every cycle.
+                    stop_evt.wait(COMMENT_DELAY_SECS)
 
         except Exception:
             pass
 
-        first_run = False
-        # Wait 10 minutes before next scan (approximates "new video detection")
-        stop_evt.wait(600)
+        # Polling cadence between sweeps (catches new videos)
+        stop_evt.wait(60)
 
-    # Worker exited — mark bot as inactive
+    # Worker exited — mark inactive
     try:
         _load_settings()
         s = _get_user_settings(uid)
@@ -823,18 +783,16 @@ def _bg_worker(bot, uid: int, stop_evt: threading.Event):
         pass
 
 
-def _start_worker(bot, uid: int):
-    """Start background worker for a user (stops existing one first)."""
-    _stop_worker(uid)
+def _start_bg_worker(bot, uid: int) -> None:
+    _stop_bg_worker(uid)
     evt = threading.Event()
-    _bg_stop[uid]   = evt
+    _bg_stop[uid] = evt
     t = threading.Thread(target=_bg_worker, args=(bot, uid, evt), daemon=True)
     _bg_thread[uid] = t
     t.start()
 
 
-def _stop_worker(uid: int):
-    """Stop background worker for a user."""
+def _stop_bg_worker(uid: int) -> None:
     if uid in _bg_stop:
         _bg_stop[uid].set()
         if uid in _bg_thread:
@@ -843,508 +801,310 @@ def _stop_worker(uid: int):
         _bg_thread.pop(uid, None)
 
 
-# ─── Menu builders — accounts ─────────────────────────────────────────────────
+# ── Neuro-feed worker ────────────────────────────────────────────────────────
 
-def _build_acc_line(acc: dict, idx: int) -> str:
-    nick      = acc.get('nickname', '?')
-    unique_id = acc.get('unique_id', 'unknown')
-    status    = "✅" if acc.get('active', False) else "❌"
-    proxy_ico = " 🔒" if acc.get('proxy', '') else ""
-    return f"№{idx} {nick} — @{unique_id} {status}{proxy_ico}"
+def _neuro_worker(bot, uid: int, stop_evt: threading.Event) -> None:
+    """Scroll FYP per active account. Like every 2nd, comment every 4th
+    using AI-generated text. Currently a skeleton — actually scrolling/
+    liking on TikTok requires Playwright (see ruklaTikTok.py). Here we
+    keep state and call hooks; wire to Playwright when ready."""
+    while not stop_evt.is_set():
+        try:
+            _load_all()
+            s = _get_user_settings(uid)
+            if not s.get('neuro_active', False):
+                stop_evt.wait(30); continue
+
+            actives = _active_accounts(uid)
+            if not actives:
+                stop_evt.wait(120); continue
+
+            for idx, acc in enumerate(actives):
+                if stop_evt.is_set():
+                    break
+                if not s.get('neuro_active', False):
+                    break
+                # Per-account FYP iteration would happen here.
+                # For now just sleep — full implementation requires
+                # Playwright (ruklaTikTok.TikTokSession.warmup_fyp + AI hook).
+                stop_evt.wait(15)
+        except Exception:
+            pass
+        stop_evt.wait(60)
+
+
+def _start_neuro_worker(bot, uid: int) -> None:
+    _stop_neuro_worker(uid)
+    evt = threading.Event()
+    _neuro_stop[uid] = evt
+    t = threading.Thread(target=_neuro_worker, args=(bot, uid, evt), daemon=True)
+    _neuro_thread[uid] = t
+    t.start()
+
+
+def _stop_neuro_worker(uid: int) -> None:
+    if uid in _neuro_stop:
+        _neuro_stop[uid].set()
+        if uid in _neuro_thread:
+            _neuro_thread[uid].join(timeout=5)
+        _neuro_stop.pop(uid, None)
+        _neuro_thread.pop(uid, None)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Menu builders
+# ════════════════════════════════════════════════════════════════════════════
+
+def _acc_line(acc: dict, idx: int) -> str:
+    nick = acc.get('display_nickname') or acc.get('nickname', '?')
+    uid_ = acc.get('unique_id', '?')
+    ico  = "✅" if acc.get('active', False) else "❌"
+    av   = " 👤" if acc.get('avatar_path') else ""
+    return f"№{idx} {nick} — @{uid_} {ico}{av}"
 
 
 def _build_accounts_text(uid: int) -> str:
-    accounts = _get_user_accounts(uid)
-    header   = _LT(uid, 'acc_header')
-    if not accounts:
+    accs = _get_user_accounts(uid)
+    header = _LT(uid, 'acc_header')
+    if not accs:
         return header + "\n\n" + _LT(uid, 'no_accs')
     lines = [header]
-    for i, acc in enumerate(accounts, 1):
-        lines.append(_build_acc_line(acc, i))
+    for i, a in enumerate(accs, 1):
+        lines.append(_acc_line(a, i))
     return "\n".join(lines)
 
 
 def _acc_markup(uid: int) -> types.InlineKeyboardMarkup:
-    markup   = types.InlineKeyboardMarkup(row_width=2)
-    accounts = _get_user_accounts(uid)
-
-    # Add / login buttons (side-by-side)
-    markup.row(
-        types.InlineKeyboardButton(_LT(uid, 'btn_cookie'), callback_data="tiktok_add_cookie"),
-        types.InlineKeyboardButton(_LT(uid, 'btn_login'),  callback_data="tiktok_add_login"),
-    )
-
-    # Per-account management rows: [🔒 №i] [🗑 №i]
-    for i in range(1, len(accounts) + 1):
-        markup.row(
-            types.InlineKeyboardButton(
-                _LT(uid, 'btn_set_proxy_i').format(i=i),
-                callback_data=f"tiktok_set_proxy_{i - 1}",
-            ),
-            types.InlineKeyboardButton(
-                _LT(uid, 'btn_del_acc_i').format(i=i),
-                callback_data=f"tiktok_del_acc_{i - 1}",
-            ),
-        )
-
-    # Buy buttons
-    markup.add(
-        types.InlineKeyboardButton(_LT(uid, 'btn_buy_acc'),   callback_data="r7_buy_acc_tiktok"),
-        types.InlineKeyboardButton(_LT(uid, 'btn_buy_proxy'), callback_data="r7_buy_proxy_tiktok"),
-    )
-    markup.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data="m_manage_tiktok"))
-    return markup
+    m = types.InlineKeyboardMarkup(row_width=1)
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_cookie'),    callback_data='tt_acc_add'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_proxy'),     callback_data='tt_proxy'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_del_acc'),   callback_data='tt_acc_del'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_params'),    callback_data='tt_params'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_buy_acc'),   callback_data='r7_buy_acc_tiktok'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_buy_proxy'), callback_data='r7_buy_proxy_tiktok'))
+    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),         callback_data='m_manage_tiktok'))
+    return m
 
 
-def open_tiktok_menu(bot, uid: int, message_id: int):
-    _load_accounts()
+def open_tiktok_menu(bot, uid: int, message_id: int) -> None:
+    _load_all()
     text = _build_accounts_text(uid)
     try:
-        bot.edit_message_text(
-            text, uid, message_id,
-            reply_markup=_acc_markup(uid),
-            parse_mode='HTML',
-        )
+        bot.edit_message_text(text, uid, message_id,
+                              reply_markup=_acc_markup(uid), parse_mode='HTML')
     except Exception:
         bot.send_message(uid, text, reply_markup=_acc_markup(uid), parse_mode='HTML')
 
 
-# ─── Menu builders — params ───────────────────────────────────────────────────
+# ── Proxy menu ───────────────────────────────────────────────────────────────
+
+def _proxy_text(uid: int) -> str:
+    s = _get_user_settings(uid)
+    proxies = s.get('proxies', [])
+    header = _LT(uid, 'proxy_header')
+    if not proxies:
+        return header + "\n\n" + _LT(uid, 'no_proxies')
+    lines = [header]
+    for i, p in enumerate(proxies, 1):
+        lines.append(f"№{i} <code>{p}</code>")
+    return "\n".join(lines)
+
+
+def _proxy_markup(uid: int) -> types.InlineKeyboardMarkup:
+    m = types.InlineKeyboardMarkup(row_width=1)
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_proxy_add'), callback_data='tt_proxy_add'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_proxy_del'), callback_data='tt_proxy_del'))
+    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),         callback_data='tt_acc_open'))
+    return m
+
+
+# ── Params menu ──────────────────────────────────────────────────────────────
+
+def _short(text: str, n: int = 35) -> str:
+    if not text:
+        return ''
+    return text if len(text) <= n else text[:n] + '…'
+
 
 def _build_params_text(uid: int) -> str:
-    s        = _get_user_settings(uid)
-    none_str = _LT(uid, 'params_none')
+    s = _get_user_settings(uid)
+    none = _LT(uid, 'none_str')
 
-    country = s.get('country') or none_str
-
-    mc = s.get('main_comment') or none_str
-    if len(mc) > 35 and mc != none_str:
-        mc = mc[:35] + '…'
-
-    replies      = s.get('replies', [])
-    non_empty    = [r for r in replies if r and r.strip()]
-    replies_str  = f"{len(non_empty)}/4" if non_empty else none_str
-
-    hashtags     = s.get('hashtags', [])
-    hashtags_str = ', '.join(f"#{h}" for h in hashtags) if hashtags else none_str
-    if len(hashtags_str) > 60 and hashtags:
-        hashtags_str = hashtags_str[:60] + '…'
-
-    bot_active = s.get('bot_active', False)
-    bot_str    = _LT(uid, 'params_bot_on') if bot_active else _LT(uid, 'params_bot_off')
+    country  = s.get('country') or none
+    hashtags = ', '.join(f"#{h}" for h in s.get('hashtags', [])) or none
+    nicks    = f"{len(s.get('nicknames', []))}" if s.get('nicknames') else none
+    avatars  = f"{len(s.get('avatars', []))}"   if s.get('avatars')   else none
+    main_v   = _short(s.get('main_message', ''), 35) or none
+    replies  = f"{len(s.get('reply_styles', []))}/{REPLY_STYLE_LIMIT}" \
+               if s.get('reply_styles') else none
+    neuro    = _LT(uid, 'on_str') if s.get('neuro_active') else _LT(uid, 'off_str')
+    state    = _LT(uid, 'on_str') if s.get('bot_active', True) else _LT(uid, 'off_str')
 
     return "\n".join([
         _LT(uid, 'params_header'),
         "",
-        _LT(uid, 'params_country').format(v=country),
-        _LT(uid, 'params_comment').format(v=mc),
-        _LT(uid, 'params_replies').format(v=replies_str),
-        _LT(uid, 'params_hashtags').format(v=hashtags_str),
-        _LT(uid, 'params_bot').format(v=bot_str),
+        _LT(uid, 'p_country' ).format(v=country),
+        _LT(uid, 'p_hashtags').format(v=_short(hashtags, 60)),
+        _LT(uid, 'p_nicks'   ).format(v=nicks),
+        _LT(uid, 'p_avatars' ).format(v=avatars),
+        _LT(uid, 'p_main'    ).format(v=main_v),
+        _LT(uid, 'p_replies' ).format(v=replies),
+        _LT(uid, 'p_neuro'   ).format(v=neuro),
+        _LT(uid, 'p_state'   ).format(v=state),
     ])
 
 
 def _params_markup(uid: int) -> types.InlineKeyboardMarkup:
-    s          = _get_user_settings(uid)
-    bot_active = s.get('bot_active', False)
-    markup     = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton(_LT(uid, 'btn_set_country'),  callback_data="tiktok_set_country"),
-        types.InlineKeyboardButton(_LT(uid, 'btn_set_comment'),  callback_data="tiktok_set_comment"),
-        types.InlineKeyboardButton(_LT(uid, 'btn_set_replies'),  callback_data="tiktok_set_replies"),
-        types.InlineKeyboardButton(_LT(uid, 'btn_add_hashtags'), callback_data="tiktok_add_hashtags"),
-    )
-    if s.get('hashtags'):
-        markup.add(
-            types.InlineKeyboardButton(
-                _LT(uid, 'btn_clear_hashtags'), callback_data="tiktok_clear_hashtags"
-            )
-        )
-    bot_btn_key = 'btn_bot_off' if bot_active else 'btn_bot_on'
-    markup.add(
-        types.InlineKeyboardButton(_LT(uid, bot_btn_key), callback_data="tiktok_toggle_bot")
-    )
-    markup.add(
-        types.InlineKeyboardButton(_LT(uid, 'btn_playwright'), callback_data="tiktok_pw_panel")
-    )
-    markup.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data="m_manage_tiktok"))
-    return markup
+    m = types.InlineKeyboardMarkup(row_width=1)
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_country'), callback_data='tt_set_country'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_add_hashtag'), callback_data='tt_set_hashtags'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_nicks'),   callback_data='tt_set_nicks'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_avatar'),  callback_data='tt_set_avatars'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_main'),    callback_data='tt_set_main'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_reply'),   callback_data='tt_set_reply'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_neuro'),       callback_data='tt_toggle_neuro'))
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_state'),       callback_data='tt_toggle_state'))
+    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),           callback_data='tt_acc_open'))
+    return m
 
 
-def open_params_menu(bot, uid: int, message_id: int):
-    _load_settings()
+def open_params_menu(bot, uid: int, message_id: int) -> None:
+    _load_all()
     text = _build_params_text(uid)
     try:
-        bot.edit_message_text(
-            text, uid, message_id,
-            reply_markup=_params_markup(uid),
-            parse_mode='HTML',
-        )
+        bot.edit_message_text(text, uid, message_id,
+                              reply_markup=_params_markup(uid),
+                              parse_mode='HTML')
     except Exception:
-        bot.send_message(uid, text, reply_markup=_params_markup(uid), parse_mode='HTML')
+        bot.send_message(uid, text, reply_markup=_params_markup(uid),
+                         parse_mode='HTML')
 
-
-# ─── Country markup ───────────────────────────────────────────────────────────
 
 def _country_markup(uid: int) -> types.InlineKeyboardMarkup:
-    markup = types.InlineKeyboardMarkup(row_width=3)
-    btns   = [
-        types.InlineKeyboardButton(c, callback_data=f"tiktok_country_{i}")
-        for i, c in enumerate(COUNTRIES)
-    ]
-    markup.add(*btns)
-    markup.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data="tiktok_params_back"))
-    return markup
+    m = types.InlineKeyboardMarkup(row_width=3)
+    btns = [types.InlineKeyboardButton(c, callback_data=f"tt_country_{i}")
+            for i, c in enumerate(COUNTRIES)]
+    m.add(*btns)
+    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data='tt_params'))
+    return m
 
 
-# ─── Cancel markup ────────────────────────────────────────────────────────────
-
-def _cancel_markup(uid: int, cancel_data: str) -> types.InlineKeyboardMarkup:
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton(_LT(uid, 'btn_cancel'), callback_data=cancel_data))
-    return markup
+def _cancel_markup(uid: int, cb: str) -> types.InlineKeyboardMarkup:
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_cancel'), callback_data=cb))
+    return m
 
 
-# ─── Callback registration ────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+#  Callback registration
+# ════════════════════════════════════════════════════════════════════════════
 
 def register_callbacks(bot):
     global _bot_ref
     _bot_ref = bot
 
-    # Load state and restart any active workers
     _load_all()
-    for uid_str, s in _settings.items():
+    # Restart any active workers
+    for uid_str, s in list(_settings.items()):
+        try:
+            uid_int = int(uid_str)
+        except Exception:
+            continue
         if s.get('bot_active', False):
-            try:
-                _start_worker(bot, int(uid_str))
-            except Exception:
-                pass
+            _start_bg_worker(bot, uid_int)
+        if s.get('neuro_active', False):
+            _start_neuro_worker(bot, uid_int)
 
-    # ── Cookie add ────────────────────────────────────────────────────────────
+    # ── open accounts menu ────────────────────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_acc_open')
+    def cb_acc_open(call):
+        uid = call.message.chat.id
+        bot.answer_callback_query(call.id)
+        open_tiktok_menu(bot, uid, call.message.message_id)
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_add_cookie')
-    def tiktok_ask_cookie(call):
+    # ── add account by cookie ────────────────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_acc_add')
+    def cb_acc_add(call):
         uid = call.message.chat.id
         _clear_pending(uid)
-        _pending_cookie_input.add(uid)
+        _pending[uid] = ACT_COOKIE
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            uid,
-            _LT(uid, 'ask_cookie'),
-            reply_markup=_cancel_markup(uid, 'tiktok_cancel_add'),
-        )
+        bot.send_message(uid, _LT(uid, 'ask_cookie'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'))
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_cancel_add')
-    def tiktok_cancel_cookie(call):
+    # ── delete accounts (one/range/all) ──────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_acc_del')
+    def cb_acc_del(call):
         uid = call.message.chat.id
-        _pending_cookie_input.discard(uid)
-        bot.answer_callback_query(call.id)
-        try:
-            bot.delete_message(uid, call.message.message_id)
-        except Exception:
-            pass
-
-    @bot.message_handler(
-        func=lambda msg: msg.chat.id in _pending_cookie_input,
-        content_types=['text'],
-    )
-    def tiktok_receive_cookie(message):
-        uid = message.chat.id
-        _pending_cookie_input.discard(uid)
-        _load_accounts()
-        accounts     = _get_user_accounts(uid)
-        cookie_lines = _normalize_cookie_input(message.text)
-
-        wait_msg = bot.send_message(uid, _LT(uid, 'checking'))
-        added = failed = 0
-        limit_hit = False
-
-        for cookie in cookie_lines:
-            if len(accounts) >= 25:
-                limit_hit = True
-                break
-            valid, nickname, unique_id = _get_tt_info(cookie)
-            accounts.append({
-                'cookie':    cookie,
-                'active':    valid,
-                'nickname':  nickname,
-                'unique_id': unique_id,
-                'proxy':     '',
-            })
-            if valid:
-                added += 1
-            else:
-                failed += 1
-
-        _set_user_accounts(uid, accounts)
-        try:
-            bot.delete_message(uid, wait_msg.message_id)
-        except Exception:
-            pass
-
-        if limit_hit:
-            bot.send_message(uid, _LT(uid, 'limit_hit'))
-
-        lines = []
-        if added:
-            lines.append(_LT(uid, 'added_ok').format(n=added))
-        if failed:
-            lines.append(_LT(uid, 'added_fail').format(n=failed))
-        if lines:
-            bot.send_message(uid, "\n".join(lines))
-
-        text = _build_accounts_text(uid)
-        bot.send_message(uid, text, reply_markup=_acc_markup(uid), parse_mode='HTML')
-
-    # ── Login/Password add ────────────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_add_login')
-    def tiktok_ask_login(call):
-        uid = call.message.chat.id
-        _clear_pending(uid)
-        _pending_login_step[uid] = {'step': 'user'}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            uid,
-            _LT(uid, 'ask_login_user'),
-            reply_markup=_cancel_markup(uid, 'tiktok_cancel_login'),
-        )
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_cancel_login')
-    def tiktok_cancel_login(call):
-        uid = call.message.chat.id
-        _pending_login_step.pop(uid, None)
-        bot.answer_callback_query(call.id)
-        try:
-            bot.delete_message(uid, call.message.message_id)
-        except Exception:
-            pass
-
-    @bot.message_handler(
-        func=lambda msg: msg.chat.id in _pending_login_step,
-        content_types=['text'],
-    )
-    def tiktok_receive_login(message):
-        uid       = message.chat.id
-        step_data = _pending_login_step.get(uid, {})
-        step      = step_data.get('step', 'user')
-
-        if step == 'user':
-            username = message.text.strip()
-            _pending_login_step[uid] = {'step': 'pass', 'username': username}
-            bot.send_message(
-                uid,
-                _LT(uid, 'ask_login_pass'),
-                reply_markup=_cancel_markup(uid, 'tiktok_cancel_login'),
-            )
-
-        elif step == 'pass':
-            username = step_data.get('username', '')
-            password = message.text.strip()
-            _pending_login_step.pop(uid, None)
-
-            # Delegate to Playwright login (runs in background thread)
-            _pw_error = None
-            try:
-                import ruklaTikTok as _rtt
-                wait_msg = bot.send_message(
-                    uid,
-                    "⏳ <b>Запускаю Playwright браузер для входу...</b>\n\n"
-                    "Це імітує реальний телефон/браузер.\n"
-                    "Зазвичай займає <b>30–90 секунд</b>.",
-                    parse_mode='HTML',
-                )
-                _rtt.pw_login_collect_cookies(
-                    bot          = bot,
-                    uid          = uid,
-                    username     = username,
-                    password     = password,
-                    wait_msg_id  = wait_msg.message_id,
-                )
-                return   # thread handles everything from here
-            except Exception as _e:
-                # Reassign to an outer-scope name; Python clears the
-                # `as` target at the end of the except clause.
-                _pw_error = _e
-
-            # ── Playwright недоступний — показати причину ─────────────────
-            if _pw_error is not None:
-                bot.send_message(
-                    uid,
-                    "⚠️ <b>Playwright недоступний</b>\n\n"
-                    f"<code>{type(_pw_error).__name__}: {_pw_error}</code>\n\n"
-                    "Встановіть:\n"
-                    "<code>pip install playwright playwright-stealth\n"
-                    "playwright install chromium</code>\n\n"
-                    "Або додайте акаунт через <b>Cookie</b>.",
-                    parse_mode='HTML',
-                )
-                return
-
-            # ── аварійний fallback (не має досягатися в нормальній роботі) ─
-            wait_msg = bot.send_message(uid, _LT(uid, 'login_checking'))
-            ok, cookie_str, nickname, unique_id = _try_tt_login(username, password)
-
-            try:
-                bot.delete_message(uid, wait_msg.message_id)
-            except Exception:
-                pass
-
-            _load_accounts()
-            accounts = _get_user_accounts(uid)
-
-            if ok:
-                if len(accounts) >= 25:
-                    bot.send_message(uid, _LT(uid, 'limit_hit'))
-                else:
-                    accounts.append({
-                        'cookie':    cookie_str,
-                        'active':    True,
-                        'nickname':  nickname,
-                        'unique_id': unique_id,
-                        'proxy':     '',
-                    })
-                    _set_user_accounts(uid, accounts)
-                    bot.send_message(
-                        uid,
-                        _LT(uid, 'login_ok').format(nick=nickname, uid=unique_id),
-                        parse_mode='HTML',
-                    )
-            else:
-                bot.send_message(uid, _LT(uid, 'login_fail'))
-
-            text = _build_accounts_text(uid)
-            bot.send_message(uid, text, reply_markup=_acc_markup(uid), parse_mode='HTML')
-
-    # ── Proxy management ──────────────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith('tiktok_set_proxy_'))
-    def tiktok_ask_proxy(call):
-        uid = call.message.chat.id
-        try:
-            idx = int(call.data.split('_')[-1])
-        except (ValueError, IndexError):
-            bot.answer_callback_query(call.id)
+        if not _get_user_accounts(uid):
+            bot.answer_callback_query(call.id, _LT(uid, 'no_accs'))
             return
         _clear_pending(uid)
-        _pending_proxy_input[uid] = idx
+        _pending[uid] = ACT_ACC_DEL
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            uid,
-            _LT(uid, 'ask_proxy').format(i=idx + 1),
-            reply_markup=_cancel_markup(uid, 'tiktok_proxy_cancel'),
-            parse_mode='HTML',
-        )
+        bot.send_message(uid, _LT(uid, 'ask_del_acc'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'),
+                         parse_mode='HTML')
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_proxy_cancel')
-    def tiktok_proxy_cancel(call):
-        uid = call.message.chat.id
-        _pending_proxy_input.pop(uid, None)
-        bot.answer_callback_query(call.id)
-        try:
-            bot.delete_message(uid, call.message.message_id)
-        except Exception:
-            pass
-
-    @bot.message_handler(
-        func=lambda msg: msg.chat.id in _pending_proxy_input,
-        content_types=['text'],
-    )
-    def tiktok_receive_proxy(message):
-        uid  = message.chat.id
-        idx  = _pending_proxy_input.pop(uid, None)
-        text = message.text.strip()
-
-        _load_accounts()
-        accounts = _get_user_accounts(uid)
-        if idx is None or idx >= len(accounts):
-            bot.send_message(uid, _LT(uid, 'acc_not_found'))
-            return
-
-        if text == '-':
-            accounts[idx]['proxy'] = ''
-            _set_user_accounts(uid, accounts)
-            bot.send_message(uid, _LT(uid, 'proxy_removed').format(i=idx + 1))
-        elif text.startswith('socks5://'):
-            accounts[idx]['proxy'] = text
-            _set_user_accounts(uid, accounts)
-            bot.send_message(uid, _LT(uid, 'proxy_set').format(i=idx + 1))
-        else:
-            bot.send_message(uid, _LT(uid, 'proxy_invalid'))
-            return
-
-        acc_text = _build_accounts_text(uid)
-        bot.send_message(uid, acc_text, reply_markup=_acc_markup(uid), parse_mode='HTML')
-
-    # ── Delete account ────────────────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith('tiktok_del_acc_'))
-    def tiktok_delete_account(call):
-        uid = call.message.chat.id
-        try:
-            idx = int(call.data.split('_')[-1])
-        except (ValueError, IndexError):
-            bot.answer_callback_query(call.id)
-            return
-        bot.answer_callback_query(call.id)
-        _load_accounts()
-        accounts = _get_user_accounts(uid)
-        if idx >= len(accounts):
-            bot.send_message(uid, _LT(uid, 'acc_not_found'))
-            return
-        accounts.pop(idx)
-        _set_user_accounts(uid, accounts)
-        bot.send_message(uid, _LT(uid, 'acc_deleted').format(i=idx + 1))
-        text = _build_accounts_text(uid)
-        try:
-            bot.edit_message_text(
-                text, uid, call.message.message_id,
-                reply_markup=_acc_markup(uid),
-                parse_mode='HTML',
-            )
-        except Exception:
-            bot.send_message(uid, text, reply_markup=_acc_markup(uid), parse_mode='HTML')
-
-    # ── Proxy purchase (TikTok) ───────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'r7_buy_proxy_tiktok')
-    def tiktok_buy_proxy(call):
-        uid = call.message.chat.id
-        bot.answer_callback_query(call.id)
-        # Delegate to rukla7 if available, else show in-dev message
-        try:
-            import rukla7
-            # rukla7 doesn't have a dedicated proxy_tiktok handler yet;
-            # fall through to message
-            raise AttributeError("no proxy handler")
-        except Exception:
-            pass
-        try:
-            import rukla as _r
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data="m_tiktok_accounts"))
-            bot.edit_message_text(
-                _r.T(uid, 'r6_in_dev'), uid, call.message.message_id, reply_markup=markup
-            )
-        except Exception:
-            pass
-
-    # ── Country selection ─────────────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_set_country')
-    def tiktok_show_countries(call):
+    # ── proxy submenu ─────────────────────────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_proxy')
+    def cb_proxy(call):
         uid = call.message.chat.id
         bot.answer_callback_query(call.id)
         try:
-            bot.edit_message_text(
-                _LT(uid, 'country_title'), uid, call.message.message_id,
-                reply_markup=_country_markup(uid),
-            )
+            bot.edit_message_text(_proxy_text(uid), uid, call.message.message_id,
+                                  reply_markup=_proxy_markup(uid),
+                                  parse_mode='HTML')
         except Exception:
-            bot.send_message(uid, _LT(uid, 'country_title'), reply_markup=_country_markup(uid))
+            bot.send_message(uid, _proxy_text(uid),
+                             reply_markup=_proxy_markup(uid),
+                             parse_mode='HTML')
 
-    @bot.callback_query_handler(func=lambda c: c.data.startswith('tiktok_country_'))
-    def tiktok_select_country(call):
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_proxy_add')
+    def cb_proxy_add(call):
+        uid = call.message.chat.id
+        _clear_pending(uid)
+        _pending[uid] = ACT_PROXY_ADD
+        bot.answer_callback_query(call.id)
+        bot.send_message(uid, _LT(uid, 'ask_proxy_add'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'),
+                         parse_mode='HTML')
+
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_proxy_del')
+    def cb_proxy_del(call):
+        uid = call.message.chat.id
+        s = _get_user_settings(uid)
+        if not s.get('proxies'):
+            bot.answer_callback_query(call.id, _LT(uid, 'no_proxies'))
+            return
+        _clear_pending(uid)
+        _pending[uid] = ACT_PROXY_DEL
+        bot.answer_callback_query(call.id)
+        bot.send_message(uid, _LT(uid, 'ask_del_proxy'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'),
+                         parse_mode='HTML')
+
+    # ── params submenu ────────────────────────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_params')
+    def cb_params(call):
+        uid = call.message.chat.id
+        bot.answer_callback_query(call.id)
+        open_params_menu(bot, uid, call.message.message_id)
+
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_country')
+    def cb_set_country(call):
+        uid = call.message.chat.id
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text(_LT(uid, 'country_title'), uid,
+                                  call.message.message_id,
+                                  reply_markup=_country_markup(uid))
+        except Exception:
+            bot.send_message(uid, _LT(uid, 'country_title'),
+                             reply_markup=_country_markup(uid))
+
+    @bot.callback_query_handler(func=lambda c: c.data.startswith('tt_country_'))
+    def cb_country_pick(call):
         uid = call.message.chat.id
         try:
             idx = int(call.data.split('_')[-1])
@@ -1352,192 +1112,366 @@ def register_callbacks(bot):
         except (ValueError, IndexError):
             bot.answer_callback_query(call.id)
             return
-        _load_settings()
         s = _get_user_settings(uid)
         s['country'] = country
         _save_settings()
         bot.answer_callback_query(call.id, _LT(uid, 'country_set').format(v=country))
-        # Return to params menu
-        text = _build_params_text(uid)
-        try:
-            bot.edit_message_text(
-                text, uid, call.message.message_id,
-                reply_markup=_params_markup(uid),
-                parse_mode='HTML',
-            )
-        except Exception:
-            bot.send_message(uid, text, reply_markup=_params_markup(uid), parse_mode='HTML')
+        open_params_menu(bot, uid, call.message.message_id)
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_params_back')
-    def tiktok_params_back(call):
-        uid = call.message.chat.id
-        bot.answer_callback_query(call.id)
-        _load_settings()
-        text = _build_params_text(uid)
-        try:
-            bot.edit_message_text(
-                text, uid, call.message.message_id,
-                reply_markup=_params_markup(uid),
-                parse_mode='HTML',
-            )
-        except Exception:
-            bot.send_message(uid, text, reply_markup=_params_markup(uid), parse_mode='HTML')
-
-    # ── Text input: comment / replies / hashtags ──────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_set_comment')
-    def tiktok_ask_comment(call):
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_hashtags')
+    def cb_set_hashtags(call):
         uid = call.message.chat.id
         _clear_pending(uid)
-        _pending_text_input[uid] = 'comment'
+        _pending[uid] = ACT_HASHTAGS
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            uid,
-            _LT(uid, 'ask_comment'),
-            reply_markup=_cancel_markup(uid, 'tiktok_text_cancel'),
-        )
+        bot.send_message(uid, _LT(uid, 'ask_hashtags'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'))
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_set_replies')
-    def tiktok_ask_replies(call):
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_nicks')
+    def cb_set_nicks(call):
         uid = call.message.chat.id
         _clear_pending(uid)
-        _pending_text_input[uid] = 'replies'
+        _pending[uid] = ACT_NICKS
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            uid,
-            _LT(uid, 'ask_replies'),
-            reply_markup=_cancel_markup(uid, 'tiktok_text_cancel'),
-            parse_mode='HTML',
-        )
+        bot.send_message(uid, _LT(uid, 'ask_nicks'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'))
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_add_hashtags')
-    def tiktok_ask_hashtags(call):
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_avatars')
+    def cb_set_avatars(call):
         uid = call.message.chat.id
         _clear_pending(uid)
-        _pending_text_input[uid] = 'hashtags'
+        _pending[uid] = ACT_AVATARS
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            uid,
-            _LT(uid, 'ask_hashtags'),
-            reply_markup=_cancel_markup(uid, 'tiktok_text_cancel'),
-        )
+        bot.send_message(uid, _LT(uid, 'ask_avatars'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'),
+                         parse_mode='HTML')
 
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_text_cancel')
-    def tiktok_text_cancel(call):
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_main')
+    def cb_set_main(call):
         uid = call.message.chat.id
-        _pending_text_input.pop(uid, None)
+        _clear_pending(uid)
+        _pending[uid] = ACT_MAIN_MSG
+        bot.answer_callback_query(call.id)
+        bot.send_message(uid, _LT(uid, 'ask_main'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'))
+
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_reply')
+    def cb_set_reply(call):
+        uid = call.message.chat.id
+        _clear_pending(uid)
+        _pending[uid] = ACT_REPLY_STYLES
+        bot.answer_callback_query(call.id)
+        bot.send_message(uid, _LT(uid, 'ask_reply'),
+                         reply_markup=_cancel_markup(uid, 'tt_cancel'),
+                         parse_mode='HTML')
+
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_toggle_neuro')
+    def cb_toggle_neuro(call):
+        uid = call.message.chat.id
+        s = _get_user_settings(uid)
+        if s.get('neuro_active', False):
+            s['neuro_active'] = False
+            _save_settings()
+            _stop_neuro_worker(uid)
+            bot.answer_callback_query(call.id, _LT(uid, 'neuro_off'))
+        else:
+            if not _active_accounts(uid):
+                bot.answer_callback_query(call.id, _LT(uid, 'need_acc'))
+                return
+            s['neuro_active'] = True
+            _save_settings()
+            _start_neuro_worker(bot, uid)
+            bot.answer_callback_query(call.id, _LT(uid, 'neuro_on'))
+        open_params_menu(bot, uid, call.message.message_id)
+
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_toggle_state')
+    def cb_toggle_state(call):
+        uid = call.message.chat.id
+        s = _get_user_settings(uid)
+        currently = s.get('bot_active', True)
+        if currently:
+            s['bot_active'] = False
+            _save_settings()
+            _stop_bg_worker(uid)
+            bot.answer_callback_query(call.id, _LT(uid, 'state_off'))
+        else:
+            if not s.get('main_message'):
+                bot.answer_callback_query(call.id, _LT(uid, 'need_main'))
+                return
+            if not s.get('hashtags'):
+                bot.answer_callback_query(call.id, _LT(uid, 'need_hashtags'))
+                return
+            if not _active_accounts(uid):
+                bot.answer_callback_query(call.id, _LT(uid, 'need_acc'))
+                return
+            s['bot_active'] = True
+            _save_settings()
+            _start_bg_worker(bot, uid)
+            bot.answer_callback_query(call.id, _LT(uid, 'state_on'))
+        open_params_menu(bot, uid, call.message.message_id)
+
+    # ── universal cancel ──────────────────────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'tt_cancel')
+    def cb_cancel(call):
+        uid = call.message.chat.id
+        _clear_pending(uid)
         bot.answer_callback_query(call.id)
         try:
             bot.delete_message(uid, call.message.message_id)
         except Exception:
             pass
 
+    # ── proxy buy stub ────────────────────────────────────────────────────
+    @bot.callback_query_handler(func=lambda c: c.data == 'r7_buy_proxy_tiktok')
+    def cb_buy_proxy(call):
+        uid = call.message.chat.id
+        bot.answer_callback_query(call.id)
+        try:
+            import rukla as _r
+            m = types.InlineKeyboardMarkup()
+            m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),
+                                             callback_data='tt_acc_open'))
+            bot.edit_message_text(_r.T(uid, 'r6_in_dev'), uid,
+                                  call.message.message_id, reply_markup=m)
+        except Exception:
+            pass
+
+    # ════════════════════════════════════════════════════════════════════
+    #  Single text-message handler — dispatches based on _pending[uid]
+    # ════════════════════════════════════════════════════════════════════
     @bot.message_handler(
-        func=lambda msg: msg.chat.id in _pending_text_input,
+        func=lambda msg: msg.chat.id in _pending,
         content_types=['text'],
     )
-    def tiktok_receive_text(message):
-        uid     = message.chat.id
-        key     = _pending_text_input.pop(uid, None)
-        raw     = message.text.strip()
+    def on_text(message):
+        uid    = message.chat.id
+        action = _pending.get(uid)
+        text   = message.text or ''
 
-        _load_settings()
-        s = _get_user_settings(uid)
+        if action == ACT_COOKIE:
+            _handle_cookie(bot, uid, text)
+        elif action == ACT_PROXY_ADD:
+            _handle_proxy_add(bot, uid, text)
+        elif action == ACT_PROXY_DEL:
+            _handle_proxy_del(bot, uid, text)
+        elif action == ACT_ACC_DEL:
+            _handle_acc_del(bot, uid, text)
+        elif action == ACT_HASHTAGS:
+            _handle_hashtags(bot, uid, text)
+        elif action == ACT_NICKS:
+            _handle_nicks(bot, uid, text)
+        elif action == ACT_MAIN_MSG:
+            _handle_main_msg(bot, uid, text)
+        elif action == ACT_REPLY_STYLES:
+            _handle_reply_styles(bot, uid, text)
+        # Avatars come via a document handler below
 
-        confirm = ''
-        if key == 'comment':
-            s['main_comment'] = raw
-            confirm = _LT(uid, 'comment_set')
-
-        elif key == 'replies':
-            lines   = [ln.strip() for ln in raw.splitlines()]
-            # Pad / trim to exactly 4 slots
-            replies = (lines + ['', '', '', ''])[:4]
-            s['replies'] = replies
-            n       = len([r for r in replies if r])
-            confirm = _LT(uid, 'replies_set').format(n=n)
-
-        elif key == 'hashtags':
-            # Accept comma-separated or newline-separated, strip '#'
-            raw_tags = re.split(r'[,\n]+', raw)
-            tags     = [t.strip().lstrip('#') for t in raw_tags if t.strip()]
-            s['hashtags'] = tags
-            displayed = ', '.join(f"#{t}" for t in tags)
-            confirm   = _LT(uid, 'hashtags_set').format(v=displayed)
-
-        _save_settings()
-        if confirm:
-            bot.send_message(uid, confirm)
-
-        # Show updated params menu
-        text = _build_params_text(uid)
-        bot.send_message(uid, text, reply_markup=_params_markup(uid), parse_mode='HTML')
-
-    # ── Clear hashtags ────────────────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_clear_hashtags')
-    def tiktok_clear_hashtags(call):
-        uid = call.message.chat.id
-        bot.answer_callback_query(call.id)
-        _load_settings()
-        s = _get_user_settings(uid)
-        s['hashtags'] = []
-        _save_settings()
-        # Also stop worker if running (no hashtags = nothing to do)
-        if uid in _bg_stop:
-            _stop_worker(uid)
-            s['bot_active'] = False
-            _save_settings()
-        text = _build_params_text(uid)
+    # ── ZIP document handler (avatars) ────────────────────────────────────
+    @bot.message_handler(
+        func=lambda msg: (msg.chat.id in _pending and
+                          _pending.get(msg.chat.id) == ACT_AVATARS),
+        content_types=['document'],
+    )
+    def on_avatars_zip(message):
+        uid = message.chat.id
+        _clear_pending(uid)
         try:
-            bot.edit_message_text(
-                text, uid, call.message.message_id,
-                reply_markup=_params_markup(uid),
-                parse_mode='HTML',
-            )
+            file_info = bot.get_file(message.document.file_id)
+            data = bot.download_file(file_info.file_path)
         except Exception:
-            bot.send_message(uid, text, reply_markup=_params_markup(uid), parse_mode='HTML')
-
-    # ── Bot toggle ────────────────────────────────────────────────────────────
-
-    @bot.callback_query_handler(func=lambda c: c.data == 'tiktok_toggle_bot')
-    def tiktok_toggle_bot(call):
-        uid = call.message.chat.id
-        bot.answer_callback_query(call.id)
-        _load_settings()
-        _load_accounts()
+            bot.send_message(uid, _LT(uid, 'avatars_zip_err'))
+            return
+        try:
+            paths = _extract_avatars_zip(uid, data)
+        except zipfile.BadZipFile:
+            bot.send_message(uid, _LT(uid, 'avatars_zip_err'))
+            return
+        if not paths:
+            bot.send_message(uid, _LT(uid, 'avatars_empty'))
+            return
         s = _get_user_settings(uid)
-        currently_active = s.get('bot_active', False)
+        s['avatars'] = paths
+        _save_settings()
+        given = _distribute_avatars(uid)
+        bot.send_message(uid, _LT(uid, 'avatars_set').format(n=len(paths), a=given))
 
-        if currently_active:
-            # Disable
-            _stop_worker(uid)
-            s['bot_active'] = False
-            _save_settings()
-            bot.send_message(uid, _LT(uid, 'bot_disabled'))
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Action handlers
+# ════════════════════════════════════════════════════════════════════════════
+
+def _handle_cookie(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    _load_accounts()
+    accs = _get_user_accounts(uid)
+    cookies = _normalize_cookie_input(text)
+
+    wait_msg = bot.send_message(uid, _LT(uid, 'checking'))
+    added = failed = dups = 0
+    limit_hit = False
+
+    # Build dedup set: existing cookies AND existing unique_ids
+    existing_cookies = {a.get('cookie', '') for a in accs}
+    existing_uids    = {a.get('unique_id', '') for a in accs
+                        if a.get('unique_id') and a.get('unique_id') != '?'}
+
+    for cookie in cookies:
+        if len(accs) >= ACCOUNT_LIMIT:
+            limit_hit = True
+            break
+        # Dedup by raw cookie
+        if cookie in existing_cookies:
+            dups += 1
+            continue
+        valid, nick, uid_ = _get_tt_info(cookie)
+        # Dedup by resolved unique_id
+        if uid_ and uid_ != '?' and uid_ in existing_uids:
+            dups += 1
+            continue
+        accs.append({
+            'cookie':    cookie,
+            'active':    valid,
+            'nickname':  nick,
+            'unique_id': uid_,
+            'display_nickname': '',
+            'avatar_path': '',
+        })
+        existing_cookies.add(cookie)
+        if uid_ and uid_ != '?':
+            existing_uids.add(uid_)
+        if valid:
+            added += 1
         else:
-            # Validate requirements before enabling
-            if not s.get('main_comment', ''):
-                bot.send_message(uid, _LT(uid, 'bot_need_setup'))
-                return
-            if not s.get('hashtags'):
-                bot.send_message(uid, _LT(uid, 'bot_need_setup'))
-                return
-            if not _get_active_account(uid):
-                bot.send_message(uid, _LT(uid, 'bot_no_acc'))
-                return
+            failed += 1
 
-            s['bot_active'] = True
-            _save_settings()
-            _start_worker(bot, uid)
-            bot.send_message(uid, _LT(uid, 'bot_enabled'))
+    _set_user_accounts(uid, accs)
+    _distribute_nicknames(uid)
+    _distribute_avatars(uid)
 
-        text = _build_params_text(uid)
-        try:
-            bot.edit_message_text(
-                text, uid, call.message.message_id,
-                reply_markup=_params_markup(uid),
-                parse_mode='HTML',
-            )
-        except Exception:
-            bot.send_message(uid, text, reply_markup=_params_markup(uid), parse_mode='HTML')
+    try:
+        bot.delete_message(uid, wait_msg.message_id)
+    except Exception:
+        pass
+
+    if limit_hit:
+        bot.send_message(uid, _LT(uid, 'limit_hit').format(lim=ACCOUNT_LIMIT))
+    parts = []
+    if added:  parts.append(_LT(uid, 'added_ok').format(n=added))
+    if failed: parts.append(_LT(uid, 'added_fail').format(n=failed))
+    if dups:   parts.append(_LT(uid, 'added_dup').format(n=dups))
+    if parts:
+        bot.send_message(uid, "\n".join(parts))
+
+    bot.send_message(uid, _build_accounts_text(uid),
+                     reply_markup=_acc_markup(uid), parse_mode='HTML')
+
+
+def _handle_acc_del(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    accs = _get_user_accounts(uid)
+    mode, indices = _parse_range(text, len(accs))
+    if mode == 'err':
+        bot.send_message(uid, _LT(uid, 'del_range_err'))
+        bot.send_message(uid, _build_accounts_text(uid),
+                         reply_markup=_acc_markup(uid), parse_mode='HTML')
+        return
+    new = [a for i, a in enumerate(accs) if i not in indices]
+    n = len(accs) - len(new)
+    _set_user_accounts(uid, new)
+    _distribute_nicknames(uid)
+    _distribute_avatars(uid)
+    bot.send_message(uid, _LT(uid, 'del_ok_n').format(n=n))
+    bot.send_message(uid, _build_accounts_text(uid),
+                     reply_markup=_acc_markup(uid), parse_mode='HTML')
+
+
+def _handle_proxy_add(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    s = _get_user_settings(uid)
+    proxies = list(s.get('proxies', []))
+    valid_lines = []
+    invalid_n = 0
+    for line in text.splitlines():
+        ln = line.strip()
+        if not ln:
+            continue
+        if _is_valid_socks5(ln) and ln not in proxies:
+            proxies.append(ln)
+            valid_lines.append(ln)
+        else:
+            invalid_n += 1
+    s['proxies'] = proxies
+    _save_settings()
+    parts = [_LT(uid, 'proxy_added_n').format(n=len(valid_lines))]
+    if invalid_n:
+        parts.append(_LT(uid, 'proxy_invalid_n').format(n=invalid_n))
+    bot.send_message(uid, "\n".join(parts))
+    bot.send_message(uid, _proxy_text(uid),
+                     reply_markup=_proxy_markup(uid), parse_mode='HTML')
+
+
+def _handle_proxy_del(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    s = _get_user_settings(uid)
+    proxies = list(s.get('proxies', []))
+    mode, indices = _parse_range(text, len(proxies))
+    if mode == 'err':
+        bot.send_message(uid, _LT(uid, 'del_range_err'))
+        bot.send_message(uid, _proxy_text(uid),
+                         reply_markup=_proxy_markup(uid), parse_mode='HTML')
+        return
+    new = [p for i, p in enumerate(proxies) if i not in indices]
+    n = len(proxies) - len(new)
+    s['proxies'] = new
+    _save_settings()
+    bot.send_message(uid, _LT(uid, 'del_ok_n').format(n=n))
+    bot.send_message(uid, _proxy_text(uid),
+                     reply_markup=_proxy_markup(uid), parse_mode='HTML')
+
+
+def _handle_hashtags(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    s = _get_user_settings(uid)
+    raw = re.split(r'[,\n]+', text)
+    tags = [t.strip().lstrip('#') for t in raw if t.strip()]
+    s['hashtags'] = tags
+    _save_settings()
+    shown = ', '.join(f"#{t}" for t in tags) or '—'
+    bot.send_message(uid, _LT(uid, 'hashtags_set').format(v=shown))
+    bot.send_message(uid, _build_params_text(uid),
+                     reply_markup=_params_markup(uid), parse_mode='HTML')
+
+
+def _handle_nicks(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    s = _get_user_settings(uid)
+    nicks = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    nicks = nicks[:ACCOUNT_LIMIT]
+    s['nicknames'] = nicks
+    _save_settings()
+    _distribute_nicknames(uid)
+    bot.send_message(uid, _LT(uid, 'nicks_set').format(n=len(nicks)))
+    bot.send_message(uid, _build_params_text(uid),
+                     reply_markup=_params_markup(uid), parse_mode='HTML')
+
+
+def _handle_main_msg(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    s = _get_user_settings(uid)
+    s['main_message'] = text.strip()
+    _save_settings()
+    bot.send_message(uid, _LT(uid, 'main_set'))
+    bot.send_message(uid, _build_params_text(uid),
+                     reply_markup=_params_markup(uid), parse_mode='HTML')
+
+
+def _handle_reply_styles(bot, uid: int, text: str) -> None:
+    _clear_pending(uid)
+    s = _get_user_settings(uid)
+    styles = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    styles = styles[:REPLY_STYLE_LIMIT]
+    s['reply_styles'] = styles
+    _save_settings()
+    bot.send_message(uid, _LT(uid, 'reply_set').format(n=len(styles)))
+    bot.send_message(uid, _build_params_text(uid),
+                     reply_markup=_params_markup(uid), parse_mode='HTML')
