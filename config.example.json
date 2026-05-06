@@ -1,0 +1,49 @@
+{
+  "headless": true,
+  "slow_mo": 50,
+
+  "telegram": {
+    "api_id":    1234567,
+    "api_hash":  "your_api_hash_here",
+    "bot_token": "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "chat_id":   0
+  },
+
+  "accounts": [
+    {
+      "account_id":  "acc1",
+      "username":    "user1@example.com",
+      "password":    "Password1!",
+      "proxy":       "1.2.3.4:8080:proxyuser1:proxypass1",
+      "cookies_file":"cookies/acc1.json"
+    },
+    {
+      "account_id":  "acc2",
+      "username":    "user2@example.com",
+      "password":    "Password2!",
+      "proxy":       "5.6.7.8:8080:proxyuser2:proxypass2",
+      "cookies_file":"cookies/acc2.json"
+    },
+    {
+      "account_id":  "acc3",
+      "username":    "user3@example.com",
+      "password":    "Password3!",
+      "proxy":       "9.10.11.12:3128:proxyuser3:proxypass3",
+      "cookies_file":"cookies/acc3.json"
+    },
+    {
+      "account_id":  "acc4",
+      "username":    "user4@example.com",
+      "password":    "Password4!",
+      "proxy":       "13.14.15.16:3128:proxyuser4:proxypass4",
+      "cookies_file":"cookies/acc4.json"
+    },
+    {
+      "account_id":  "acc5",
+      "username":    "user5@example.com",
+      "password":    "Password5!",
+      "proxy":       "17.18.19.20:8080:proxyuser5:proxypass5",
+      "cookies_file":"cookies/acc5.json"
+    }
+  ]
+}
