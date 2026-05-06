@@ -396,6 +396,40 @@ _TT_HEADERS = {
 }
 
 
+# ─── Cookie normalisation ─────────────────────────────────────────────────────
+
+def _normalize_cookie_input(raw_text: str) -> list:
+    """
+    Accept any common cookie format and return a list of plain
+    'key=value; key2=value2' strings (one string = one account).
+
+    Supported inputs:
+      • JSON array   [{"name":"sessionid","value":"abc",...}, ...]
+        (exported by EditThisCookie, Cookie-Editor, etc.)
+      • Plain string  sessionid=abc; uid=123; ...
+      • Multiple plain strings, one per line (several accounts at once)
+    """
+    raw_text = raw_text.strip()
+
+    # ── JSON array (one or more cookies for a single account) ──────────────
+    if raw_text.startswith('['):
+        try:
+            items = json.loads(raw_text)
+            parts = []
+            for item in items:
+                name  = item.get('name', '')
+                value = item.get('value', '')
+                if name:
+                    parts.append(f"{name}={value}")
+            result = '; '.join(parts)
+            return [result] if result else []
+        except (json.JSONDecodeError, AttributeError):
+            pass  # fall through to plain-string handling
+
+    # ── Plain string(s), one per line ──────────────────────────────────────
+    return [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+
+
 # ─── TikTok API helpers ───────────────────────────────────────────────────────
 
 def _make_session(cookie_str: str = '', proxy_str: str = '') -> requests.Session:
@@ -416,7 +450,9 @@ def _make_session(cookie_str: str = '', proxy_str: str = '') -> requests.Session
 def _get_tt_info(cookie_str: str, proxy_str: str = '') -> tuple:
     """Check TikTok cookie validity. Returns (valid, nickname, unique_id)."""
     try:
-        if 'sessionid' not in cookie_str:
+        # Accept sessionid, sid_guard or sessionid_ss as valid session markers
+        _SESSION_KEYS = ('sessionid', 'sid_guard', 'sessionid_ss')
+        if not any(k in cookie_str for k in _SESSION_KEYS):
             return False, '?', 'unknown'
         s = _make_session(cookie_str, proxy_str)
 
@@ -454,6 +490,29 @@ def _get_tt_info(cookie_str: str, proxy_str: str = '') -> tuple:
             except Exception:
                 pass
 
+        # Fallback 2: /passport/web/account/info/ with different headers
+        try:
+            resp3 = s.get(
+                'https://www.tiktok.com/passport/web/account/info/',
+                headers={'Referer': 'https://www.tiktok.com/'},
+                timeout=10,
+            )
+            if resp3.status_code == 200:
+                d3 = resp3.json()
+                if d3.get('data'):
+                    u = d3['data']
+                    nickname  = u.get('nickname') or u.get('display_name') or '?'
+                    unique_id = u.get('unique_id') or u.get('username') or '?'
+                    if unique_id != '?':
+                        return True, nickname, unique_id
+                    # Account exists but nickname/uid not returned — treat as valid
+                    # with a placeholder so it can still be stored
+                    return True, u.get('email', 'TikTok'), 'user'
+        except Exception:
+            pass
+
+        # Fallback 3: session is present but all API checks failed
+        # Mark as added-but-unverified (active=False shows ❌ in list)
         return False, '?', 'unknown'
     except Exception:
         return False, '?', 'unknown'
@@ -977,12 +1036,8 @@ def register_callbacks(bot):
         uid = message.chat.id
         _pending_cookie_input.discard(uid)
         _load_accounts()
-        accounts    = _get_user_accounts(uid)
-        cookie_lines = [
-            ln.strip()
-            for ln in message.text.strip().splitlines()
-            if ln.strip()
-        ]
+        accounts     = _get_user_accounts(uid)
+        cookie_lines = _normalize_cookie_input(message.text)
 
         wait_msg = bot.send_message(uid, _LT(uid, 'checking'))
         added = failed = 0
