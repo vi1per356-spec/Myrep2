@@ -1,0 +1,425 @@
+--- a/rukla1 (1).py
++++ b/rukla1 (1).py
+@@ -562,6 +562,8 @@
+ async def show_accounts_menu(chat_id):
+     ctx = get_ctx(chat_id)
+     ctx.user_states[chat_id] = "WAITING_PHONE"
++    # Очищуємо «секцію керування» — щоб наступний back повертав сюди.
++    ctx._url_section = None
+     acc_list = await _build_acc_list(chat_id, ctx.userbots)
+     text = _T(chat_id, 'r1_acc_header') + "\n" + acc_list
+     await ctx.show_nav(chat_id, text, buttons=menu_accounts(ctx))
+@@ -569,6 +571,7 @@
+ async def show_url_manage_accounts_menu(chat_id):
+     ctx = get_ctx(chat_id)
+     ctx.user_states[chat_id] = "WAITING_PHONE"
++    ctx._url_section = 'acc'
+     acc_list = await _build_acc_list(chat_id, ctx.userbots)
+     text = _T(chat_id, 'r1_acc_header') + "\n" + acc_list
+     await ctx.show_nav(chat_id, text, buttons=menu_url_manage_accounts(ctx))
+@@ -576,6 +579,7 @@
+ async def show_url_manage_params_menu(chat_id):
+     ctx = get_ctx(chat_id)
+     ctx.user_states[chat_id] = "WAITING_PHONE"
++    ctx._url_section = 'params'
+     acc_list = await _build_acc_list(chat_id, ctx.userbots)
+     text = _T(chat_id, 'r1_acc_header') + "\n" + acc_list
+     await ctx.show_nav(chat_id, text, buttons=menu_url_manage_params(ctx))
+@@ -583,6 +587,7 @@
+ async def show_group_accounts_menu(chat_id):
+     ctx = get_ctx(chat_id)
+     ctx.user_states[chat_id] = "G_WAITING_PHONE"
++    ctx._grp_section = None
+     acc_list = await _build_acc_list(chat_id, ctx.group_userbots)
+     text = _T(chat_id, 'r1_acc_header') + "\n" + acc_list
+     await ctx.show_nav(chat_id, text, buttons=menu_group_accounts(ctx))
+@@ -590,6 +595,7 @@
+ async def show_grp_manage_accounts_menu(chat_id):
+     ctx = get_ctx(chat_id)
+     ctx.user_states[chat_id] = "G_WAITING_PHONE"
++    ctx._grp_section = 'acc'
+     acc_list = await _build_acc_list(chat_id, ctx.group_userbots)
+     text = _T(chat_id, 'r1_acc_header') + "\n" + acc_list
+     await ctx.show_nav(chat_id, text, buttons=menu_grp_manage_accounts(ctx))
+@@ -597,10 +603,36 @@
+ async def show_grp_manage_params_menu(chat_id):
+     ctx = get_ctx(chat_id)
+     ctx.user_states[chat_id] = "G_WAITING_PHONE"
++    ctx._grp_section = 'params'
+     acc_list = await _build_acc_list(chat_id, ctx.group_userbots)
+     text = _T(chat_id, 'r1_acc_header') + "\n" + acc_list
+     await ctx.show_nav(chat_id, text, buttons=menu_grp_manage_params(ctx))
+ 
++
++# ── Помічники: повернутися у попередню «секцію» керування ──────────
++async def show_back_url_section(chat_id):
++    """Повертає на ту manage-сторінку URL-реклами, з якої прийшли."""
++    ctx = get_ctx(chat_id)
++    section = getattr(ctx, '_url_section', None)
++    if section == 'acc':
++        await show_url_manage_accounts_menu(chat_id)
++    elif section == 'params':
++        await show_url_manage_params_menu(chat_id)
++    else:
++        await show_accounts_menu(chat_id)
++
++
++async def show_back_grp_section(chat_id):
++    """Повертає на ту manage-сторінку групової реклами, з якої прийшли."""
++    ctx = get_ctx(chat_id)
++    section = getattr(ctx, '_grp_section', None)
++    if section == 'acc':
++        await show_grp_manage_accounts_menu(chat_id)
++    elif section == 'params':
++        await show_grp_manage_params_menu(chat_id)
++    else:
++        await show_group_accounts_menu(chat_id)
++
+ def is_auth(user_id):
+     return user_id in authenticated_users
+ 
+@@ -914,7 +946,7 @@
+             ctx.userbots.clear()
+             await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_all_ok').format(count=count))
+             await asyncio.sleep(1)
+-            await show_accounts_menu(chat_id)
++            await show_back_url_section(chat_id)
+         elif "-" in text_stripped:
+             parts = text_stripped.split("-")
+             try:
+@@ -939,7 +971,7 @@
+             except:
+                 await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_range_err'))
+             await asyncio.sleep(1)
+-            await show_accounts_menu(chat_id)
++            await show_back_url_section(chat_id)
+         else:
+             num_str = ''.join(filter(str.isdigit, text))
+             if num_str:
+@@ -955,7 +987,7 @@
+                         pass
+                     await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_one_ok').format(num=num+1))
+                     await asyncio.sleep(1)
+-                    await show_accounts_menu(chat_id)
++                    await show_back_url_section(chat_id)
+                 else:
+                     await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_no_num'))
+         return
+@@ -968,7 +1000,7 @@
+                 pass
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_rename_ok'))
+         await asyncio.sleep(1)
+-        await show_accounts_menu(chat_id)
++        await show_back_url_section(chat_id)
+         return
+ 
+     elif state == "WAITING_BIO":
+@@ -979,7 +1011,7 @@
+                 pass
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_bio_ok'))
+         await asyncio.sleep(1)
+-        await show_accounts_menu(chat_id)
++        await show_back_url_section(chat_id)
+         return
+ 
+     elif state == "WAITING_CHANNEL_NAME":
+@@ -1002,6 +1034,14 @@
+         phone = re.sub(r'[^\d\+]', '', text)
+         if not phone.startswith("+"):
+             phone = "+" + phone
++        # Дедуп: якщо акаунт уже доданий — нічого не робимо
++        if any(a.get('phone') == phone for a in ctx.userbots):
++            await ctx.send_and_track(
++                chat_id,
++                f"↩️ Акаунт {phone} вже доданий — пропускаю."
++            )
++            ctx.user_states.pop(chat_id, None)
++            return
+         ubot = TelegramClient(os.path.join(ctx._sessions_dir, phone), API_ID, API_HASH)
+         await ubot.connect()
+         try:
+@@ -1055,7 +1095,7 @@
+             ctx.group_userbots.clear()
+             await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_all_ok').format(count=count))
+             await asyncio.sleep(1)
+-            await show_group_accounts_menu(chat_id)
++            await show_back_grp_section(chat_id)
+         elif "-" in text_stripped:
+             parts = text_stripped.split("-")
+             try:
+@@ -1080,7 +1120,7 @@
+             except:
+                 await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_range_err'))
+             await asyncio.sleep(1)
+-            await show_group_accounts_menu(chat_id)
++            await show_back_grp_section(chat_id)
+         else:
+             num_str = ''.join(filter(str.isdigit, text))
+             if num_str:
+@@ -1096,7 +1136,7 @@
+                         pass
+                     await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_one_ok').format(num=num+1))
+                     await asyncio.sleep(1)
+-                    await show_group_accounts_menu(chat_id)
++                    await show_back_grp_section(chat_id)
+                 else:
+                     await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_no_num'))
+         return
+@@ -1120,7 +1160,7 @@
+             await asyncio.sleep(0.5)
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_grp_rename_ok').format(changed=changed, total=len(ctx.group_userbots)))
+         await asyncio.sleep(1)
+-        await show_group_accounts_menu(chat_id)
++        await show_back_grp_section(chat_id)
+         return
+ 
+     elif state == "G_WAITING_BIO":
+@@ -1132,13 +1172,21 @@
+             await asyncio.sleep(0.3)
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_grp_bio_ok'))
+         await asyncio.sleep(1)
+-        await show_group_accounts_menu(chat_id)
++        await show_back_grp_section(chat_id)
+         return
+ 
+     elif state == "G_WAITING_PHONE":
+         phone = re.sub(r'[^\d\+]', '', text)
+         if not phone.startswith("+"):
+             phone = "+" + phone
++        # Дедуп: якщо акаунт уже доданий у групову рекламу — нічого не робимо
++        if any(a.get('phone') == phone for a in ctx.group_userbots):
++            await ctx.send_and_track(
++                chat_id,
++                f"↩️ Акаунт {phone} вже доданий у групову рекламу — пропускаю."
++            )
++            ctx.user_states.pop(chat_id, None)
++            return
+         os.makedirs(ctx._group_sessions_dir, exist_ok=True)
+         sess_name = os.path.join(ctx._group_sessions_dir, phone)
+         ubot = TelegramClient(sess_name, API_ID, API_HASH)
+@@ -1326,7 +1374,7 @@
+         ctx.user_states[chat_id] = None
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_photo_ok').format(success=success, total=len(ctx.userbots)))
+         await asyncio.sleep(1)
+-        await show_accounts_menu(chat_id)
++        await show_back_url_section(chat_id)
+         return
+ 
+ # ================= СТВОРЕННЯ ПЕРСОНАЛЬНОГО КАНАЛУ =================
+@@ -1395,7 +1443,7 @@
+ 
+     await ctx.send_and_track(chat_id, _T(chat_id, 'r1_ch_create_ok').format(created=created_count, total=len(ctx.userbots)))
+     await asyncio.sleep(1)
+-    await show_accounts_menu(chat_id)
++    await show_back_url_section(chat_id)
+ 
+ # ================= ОБРОБНИК ZIP (URL акаунти) =================
+ async def _handle_zip(ctx: UserContext, event, chat_id):
+@@ -1436,7 +1484,7 @@
+                     pass
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_zip_ok').format(loaded=loaded))
+         await asyncio.sleep(2)
+-        await show_accounts_menu(chat_id)
++        await show_back_url_section(chat_id)
+     except Exception as e:
+         await ctx.send_and_track(chat_id, f"❌ Помилка обробки ZIP: {e}")
+     finally:
+@@ -1482,7 +1530,7 @@
+                     pass
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_grp_zip_ok').format(loaded=loaded))
+         await asyncio.sleep(2)
+-        await show_group_accounts_menu(chat_id)
++        await show_back_grp_section(chat_id)
+     except Exception as e:
+         await ctx.send_and_track(chat_id, f"❌ Помилка обробки ZIP: {e}")
+     finally:
+@@ -1553,7 +1601,7 @@
+             _T(chat_id, 'r1_avatar_zip_result').format(photo=photo_count, no_photo=no_photo_count)
+         )
+         await asyncio.sleep(1)
+-        await show_group_accounts_menu(chat_id)
++        await show_back_grp_section(chat_id)
+     except Exception as e:
+         await ctx.send_and_track(chat_id, f"❌ Помилка: {e}")
+     finally:
+@@ -1585,7 +1633,8 @@
+     elif data == b"back_to_main":
+         await show_start_menu(chat_id)
+     elif data == b"back_to_accounts":
+-        await show_accounts_menu(chat_id)
++        # Повертаємось на manage-сторінку, з якої зайшли (а не у головне меню)
++        await show_back_url_section(chat_id)
+     elif data == b"delete_account":
+         ctx.user_states[chat_id] = "WAITING_DELETE_NUM"
+         acc_list = ""
+@@ -1610,7 +1659,7 @@
+                 pass
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_avatar_ok').format(total=total))
+         await asyncio.sleep(1)
+-        await show_accounts_menu(chat_id)
++        await show_back_url_section(chat_id)
+     elif data == b"change_bio":
+         ctx.user_states[chat_id] = "WAITING_BIO"
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_bio_prompt'))
+@@ -1637,7 +1686,7 @@
+             total_deleted += deleted
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_clear_chats_ok').format(total=total_deleted))
+         await asyncio.sleep(2)
+-        await show_accounts_menu(chat_id)
++        await show_back_url_section(chat_id)
+     elif data == b"url_proxy_connect":
+         if not SOCKS5_AVAILABLE:
+             await ctx.send_and_track(chat_id, _T(chat_id, 'r1_proxy_no_lib'),
+@@ -1679,7 +1728,8 @@
+     elif data == b"grp_manage_params":
+         await show_grp_manage_params_menu(chat_id)
+     elif data == b"g_back_to_accounts":
+-        await show_group_accounts_menu(chat_id)
++        # Повертаємось на manage-сторінку групової реклами, з якої зайшли
++        await show_back_grp_section(chat_id)
+     elif data == b"g_delete_account":
+         ctx.user_states[chat_id] = "G_WAITING_DELETE_NUM"
+         acc_list = ""
+@@ -1706,7 +1756,7 @@
+                 pass
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_del_avatar_ok').format(total=total))
+         await asyncio.sleep(1)
+-        await show_group_accounts_menu(chat_id)
++        await show_back_grp_section(chat_id)
+     elif data == b"g_change_bio":
+         ctx.user_states[chat_id] = "G_WAITING_BIO"
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_grp_bio_prompt'))
+@@ -1728,7 +1778,7 @@
+             total_deleted += deleted
+         await ctx.send_and_track(chat_id, _T(chat_id, 'r1_clear_chats_ok').format(total=total_deleted))
+         await asyncio.sleep(2)
+-        await show_group_accounts_menu(chat_id)
++        await show_back_grp_section(chat_id)
+ 
+     # ================= УПРАВЛІННЯ КАНАЛАМИ =================
+     elif data == b"manage_channels":
+@@ -1877,6 +1927,8 @@
+                 discussion_chat = None
+                 discussion_msg = None
+ 
++                # Sticky-active: один акаунт працює, поки не впаде; тоді fallback
++                # на наступний, і саме він стає новим активним.
+                 for i in range(len(ctx.userbots)):
+                     idx = (ctx.active_commenter_idx + i) % len(ctx.userbots)
+                     current_client = ctx.userbots[idx]["client"]
+@@ -1902,7 +1954,12 @@
+                             ai_reply_text,
+                             reply_to=discussion_msg.id
+                         )
+-                        ctx.active_commenter_idx = (idx + 1) % len(ctx.userbots)
++                        # Зберігаємо ЦЕЙ акаунт як активний; зміщуємо лише якщо
++                        # довелось робити fallback (i > 0 означає, що
++                        # попередньо активний акаунт упав).
++                        if i > 0:
++                            ctx.active_commenter_idx = idx
++                            print(f"[{bot_phone}] Активний акаунт переключено на цього після fallback")
+                         success = True
+                         successful_client = current_client
+                         print(f"[{bot_phone}] Успішно надіслано коментар до поста {msg.id}")
+@@ -2095,6 +2152,25 @@
+ 
+ # ================= ФІНАЛІЗАЦІЯ АКАУНТА (URL) =================
+ async def finalize_auth(ctx: UserContext, ubot: TelegramClient, phone: str, chat_id=None, quiet=False):
++    # Дедуп за номером телефону
++    if any(a.get('phone') == phone for a in ctx.userbots):
++        if chat_id and not quiet:
++            await ctx.send_and_track(
++                chat_id,
++                f"↩️ Акаунт {phone} вже доданий — пропускаю."
++            )
++        try:
++            await ubot.disconnect()
++        except Exception:
++            pass
++        try:
++            sess_path = os.path.join(ctx._sessions_dir, f"{phone}.session")
++            if os.path.exists(sess_path):
++                os.remove(sess_path)
++        except Exception:
++            pass
++        return False
++
+     if len(ctx.userbots) >= 25:
+         if chat_id and not quiet:
+             await ctx.send_and_track(chat_id, _T(chat_id, 'r1_acc_limit'))
+@@ -2104,6 +2180,24 @@
+             pass
+         return False
+     me = await ubot.get_me()
++    # Дедуп за Telegram user id (на випадок, якщо номер змінили, а акаунт той самий)
++    if any(a.get('id') == me.id for a in ctx.userbots):
++        if chat_id and not quiet:
++            await ctx.send_and_track(
++                chat_id,
++                f"↩️ Акаунт {me.first_name} вже доданий під іншим номером — пропускаю."
++            )
++        try:
++            await ubot.disconnect()
++        except Exception:
++            pass
++        try:
++            sess_path = os.path.join(ctx._sessions_dir, f"{phone}.session")
++            if os.path.exists(sess_path):
++                os.remove(sess_path)
++        except Exception:
++            pass
++        return False
+     ctx.userbots.append({"phone": phone, "client": ubot, "name": me.first_name, "id": me.id})
+     setup_userbot_handler(ctx, ubot, phone, me.id)
+     # Запускаємо отримання подій для цього клієнта
+@@ -2326,6 +2420,25 @@
+ 
+ # ================= ФІНАЛІЗАЦІЯ АКАУНТА (реклама у групах) =================
+ async def finalize_group_auth(ctx: UserContext, ubot: TelegramClient, phone: str, chat_id=None, quiet=False):
++    # Дедуп за номером телефону
++    if any(a.get('phone') == phone for a in ctx.group_userbots):
++        if chat_id and not quiet:
++            await ctx.send_and_track(
++                chat_id,
++                f"↩️ Акаунт {phone} вже доданий у групову рекламу — пропускаю."
++            )
++        try:
++            await ubot.disconnect()
++        except Exception:
++            pass
++        try:
++            sess_path = os.path.join(ctx._group_sessions_dir, f"{phone}.session")
++            if os.path.exists(sess_path):
++                os.remove(sess_path)
++        except Exception:
++            pass
++        return False
++
+     if len(ctx.group_userbots) >= 25:
+         if chat_id and not quiet:
+             await ctx.send_and_track(chat_id, _T(chat_id, 'r1_acc_limit'))
+@@ -2335,6 +2448,24 @@
+             pass
+         return False
+     me = await ubot.get_me()
++    # Дедуп за Telegram user id
++    if any(a.get('id') == me.id for a in ctx.group_userbots):
++        if chat_id and not quiet:
++            await ctx.send_and_track(
++                chat_id,
++                f"↩️ Акаунт {me.first_name} вже доданий у групову рекламу під іншим номером — пропускаю."
++            )
++        try:
++            await ubot.disconnect()
++        except Exception:
++            pass
++        try:
++            sess_path = os.path.join(ctx._group_sessions_dir, f"{phone}.session")
++            if os.path.exists(sess_path):
++                os.remove(sess_path)
++        except Exception:
++            pass
++        return False
+     acc = {"phone": phone, "client": ubot, "name": me.first_name, "id": me.id}
+     ctx.group_userbots.append(acc)
+     if ctx.group_bot_settings.get("monitoring_channel_id"):
