@@ -1162,8 +1162,10 @@ def register_callbacks(bot):
                     wait_msg_id  = wait_msg.message_id,
                 )
                 return   # thread handles everything from here
-            except Exception as _pw_error:
-                pass
+            except Exception as _e:
+                # Reassign to an outer-scope name; Python clears the
+                # `as` target at the end of the except clause.
+                _pw_error = _e
 
             # ── Playwright недоступний — показати причину ─────────────────
             if _pw_error is not None:
