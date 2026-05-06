@@ -855,10 +855,16 @@ def pw_login_collect_cookies(
 
             # Resolve nickname / unique_id via requests
             valid, nickname, unique_id = _r5._get_tt_info(cookie_str, proxy)
-            if not valid:
-                # Cookies are fresh — store anyway with placeholder info
-                nickname  = username.split("@")[0]
-                unique_id = nickname
+
+            # Fall back to the user-provided login when the profile API
+            # is unavailable (regional / missing tokens) and returns
+            # placeholders. This avoids "№1 — — @? ✅" entries.
+            _PLACEHOLDER = ('?', '—', '', None, 'unknown')
+            fallback = username.split("@")[0] if "@" in username else username
+            if not valid or unique_id in _PLACEHOLDER:
+                unique_id = fallback or unique_id
+            if nickname in _PLACEHOLDER:
+                nickname = fallback or nickname
 
             accounts.append({
                 "cookie":    cookie_str,
