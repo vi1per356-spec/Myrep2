@@ -619,6 +619,274 @@ class TikTokSession:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  PLAYWRIGHT LOGIN  — collect cookies by simulating real browser login
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Possible results returned by _pw_login_and_collect_async
+_LOGIN_OK         = "ok"
+_LOGIN_CAPTCHA    = "captcha"
+_LOGIN_VERIFY     = "verify"     # email / SMS verification code requested
+_LOGIN_WRONG_CRED = "wrong_cred"
+_LOGIN_ERROR      = "error"
+
+
+async def _pw_login_and_collect_async(
+    username: str,
+    password: str,
+    proxy: str = "",
+) -> tuple[str, str]:
+    """
+    Open a stealth Playwright browser, log in to TikTok, collect cookies.
+
+    Returns (status, cookie_str) where status is one of the _LOGIN_* constants
+    and cookie_str is 'key=val; key2=val2' (empty string on failure).
+    """
+    account = AccountConfig(
+        account_id      = "_pw_login",
+        username        = username,
+        password        = password,
+        proxy           = proxy,
+        cookies_file    = "",   # no file needed
+    )
+
+    async with async_playwright() as pw:
+        session = TikTokSession(account, pw)
+        await session.launch()
+
+        try:
+            # ── navigate to login page ────────────────────────────────────
+            await session.page.goto(
+                "https://www.tiktok.com/login/phone-or-email/email",
+                wait_until="domcontentloaded",
+                timeout=35_000,
+            )
+            await session._delay(2_000, 4_500)
+
+            # ── fill username ─────────────────────────────────────────────
+            try:
+                email_input = await session.page.wait_for_selector(
+                    'input[name="username"]', timeout=15_000
+                )
+            except Exception:
+                return _LOGIN_ERROR, ""
+
+            await email_input.click()
+            await session._delay(300, 700)
+            await session._human_type_element(email_input, username)
+            await session._delay(600, 1_200)
+
+            # ── fill password ─────────────────────────────────────────────
+            try:
+                pwd_input = await session.page.wait_for_selector(
+                    'input[type="password"]', timeout=10_000
+                )
+            except Exception:
+                return _LOGIN_ERROR, ""
+
+            await pwd_input.click()
+            await session._delay(300, 700)
+            await session._human_type_element(pwd_input, password)
+            await session._delay(900, 1_800)
+
+            # ── submit ────────────────────────────────────────────────────
+            try:
+                submit = await session.page.wait_for_selector(
+                    'button[type="submit"]', timeout=10_000
+                )
+                await submit.click()
+            except Exception:
+                return _LOGIN_ERROR, ""
+
+            await session._delay(4_000, 8_000)
+
+            # ── check post-login state ────────────────────────────────────
+
+            # CAPTCHA
+            if await session._captcha_present():
+                logger.warning("[_pw_login] CAPTCHA detected")
+                return _LOGIN_CAPTCHA, ""
+
+            # Email / SMS verification form
+            verify_selectors = [
+                'input[placeholder*="code"]',
+                'input[placeholder*="код"]',
+                'input[name="code"]',
+                '[class*="VerifyCode"]',
+                '[data-e2e*="verify"]',
+            ]
+            for sel in verify_selectors:
+                try:
+                    await session.page.wait_for_selector(sel, timeout=2_500)
+                    logger.warning("[_pw_login] verification code screen detected")
+                    return _LOGIN_VERIFY, ""
+                except Exception:
+                    pass
+
+            # Wrong credentials message
+            error_selectors = [
+                '[class*="error"]',
+                '[class*="Error"]',
+                '[data-e2e*="error"]',
+            ]
+            for sel in error_selectors:
+                try:
+                    el = await session.page.wait_for_selector(sel, timeout=2_000)
+                    text = await el.inner_text()
+                    if text and len(text.strip()) > 3:
+                        logger.warning("[_pw_login] error text on page: %s", text[:80])
+                        return _LOGIN_WRONG_CRED, ""
+                except Exception:
+                    pass
+
+            # Check if logged in
+            if not await session.verify_login():
+                return _LOGIN_WRONG_CRED, ""
+
+            # ── collect cookies ───────────────────────────────────────────
+            pw_cookies = await session.context.cookies()
+            tiktok_cookies = [
+                c for c in pw_cookies
+                if "tiktok.com" in c.get("domain", "")
+            ]
+
+            if not tiktok_cookies:
+                return _LOGIN_ERROR, ""
+
+            cookie_str = "; ".join(
+                f"{c['name']}={c['value']}"
+                for c in tiktok_cookies
+            )
+            logger.info("[_pw_login] collected %d cookies", len(tiktok_cookies))
+            return _LOGIN_OK, cookie_str
+
+        except Exception as exc:
+            logger.exception("[_pw_login] unexpected error: %s", exc)
+            return _LOGIN_ERROR, ""
+        finally:
+            await session.close()
+
+
+def pw_login_collect_cookies(
+    bot,
+    uid:         int,
+    username:    str,
+    password:    str,
+    proxy:       str = "",
+    wait_msg_id: int = 0,
+) -> None:
+    """
+    Run Playwright login in a daemon thread.
+    On completion sends result back via bot.send_message(uid, ...) and
+    appends the account to rukla5's storage if login succeeded.
+    """
+
+    def _thread() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            status, cookie_str = loop.run_until_complete(
+                _pw_login_and_collect_async(username, password, proxy)
+            )
+        except Exception as exc:
+            logger.exception("pw_login_collect_cookies thread error")
+            status, cookie_str = _LOGIN_ERROR, ""
+        finally:
+            loop.close()
+
+        # Remove wait message
+        if wait_msg_id:
+            try:
+                bot.delete_message(uid, wait_msg_id)
+            except Exception:
+                pass
+
+        # ── failure paths ─────────────────────────────────────────────────
+        if status == _LOGIN_CAPTCHA:
+            bot.send_message(
+                uid,
+                "⚠️ <b>TikTok показав CAPTCHA</b>\n\n"
+                "Playwright не може вирішити CAPTCHA автоматично.\n"
+                "Варіанти:\n"
+                "• Увійдіть у браузері вручну та скопіюйте <b>кукі</b>\n"
+                "• Спробуйте ще раз через кілька хвилин з іншим IP",
+                parse_mode="HTML",
+            )
+            return
+
+        if status == _LOGIN_VERIFY:
+            bot.send_message(
+                uid,
+                "⚠️ <b>Потрібна верифікація (email/SMS)</b>\n\n"
+                "TikTok надіслав код підтвердження.\n"
+                "Увійдіть у браузері вручну, підтвердіть акаунт, "
+                "а потім скопіюйте <b>кукі</b>.",
+                parse_mode="HTML",
+            )
+            return
+
+        if status == _LOGIN_WRONG_CRED:
+            bot.send_message(
+                uid,
+                "❌ <b>Невірний логін або пароль</b>\n\n"
+                "Перевірте дані та спробуйте ще раз.",
+                parse_mode="HTML",
+            )
+            return
+
+        if status != _LOGIN_OK or not cookie_str:
+            bot.send_message(
+                uid,
+                "❌ <b>Не вдалося увійти</b>\n\n"
+                "Playwright не зміг завершити вхід.\n"
+                "Спробуйте додати акаунт через <b>кукі</b>.",
+                parse_mode="HTML",
+            )
+            return
+
+        # ── success — store account ───────────────────────────────────────
+        try:
+            import rukla5 as _r5
+            _r5._load_accounts()
+            accounts = _r5._get_user_accounts(uid)
+
+            if len(accounts) >= 25:
+                bot.send_message(uid, "⚠️ Досягнуто ліміт у 25 акаунтів")
+                return
+
+            # Resolve nickname / unique_id via requests
+            valid, nickname, unique_id = _r5._get_tt_info(cookie_str, proxy)
+            if not valid:
+                # Cookies are fresh — store anyway with placeholder info
+                nickname  = username.split("@")[0]
+                unique_id = nickname
+
+            accounts.append({
+                "cookie":    cookie_str,
+                "active":    True,
+                "nickname":  nickname,
+                "unique_id": unique_id,
+                "proxy":     proxy,
+            })
+            _r5._set_user_accounts(uid, accounts)
+
+            bot.send_message(
+                uid,
+                f"✅ Акаунт <b>{nickname}</b> (@{unique_id}) додано через Playwright",
+                parse_mode="HTML",
+            )
+            # Refresh account list
+            text   = _r5._build_accounts_text(uid)
+            markup = _r5._acc_markup(uid)
+            bot.send_message(uid, text, reply_markup=markup, parse_mode="HTML")
+
+        except Exception as exc:
+            logger.exception("pw_login_collect_cookies: account storage error")
+            bot.send_message(uid, f"❌ Помилка збереження: {exc}")
+
+    threading.Thread(target=_thread, daemon=True).start()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  PLAYWRIGHT PANEL STATE
 # ══════════════════════════════════════════════════════════════════════════════
 

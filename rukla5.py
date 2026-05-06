@@ -1127,6 +1127,28 @@ def register_callbacks(bot):
             password = message.text.strip()
             _pending_login_step.pop(uid, None)
 
+            # Delegate to Playwright login (runs in background thread)
+            try:
+                import ruklaTikTok as _rtt
+                wait_msg = bot.send_message(
+                    uid,
+                    "⏳ <b>Запускаю Playwright браузер для входу...</b>\n\n"
+                    "Це імітує реальний телефон/браузер.\n"
+                    "Зазвичай займає <b>30–90 секунд</b>.",
+                    parse_mode='HTML',
+                )
+                _rtt.pw_login_collect_cookies(
+                    bot          = bot,
+                    uid          = uid,
+                    username     = username,
+                    password     = password,
+                    wait_msg_id  = wait_msg.message_id,
+                )
+                return   # thread handles everything from here
+            except ImportError:
+                pass
+
+            # ── fallback if ruklaTikTok is unavailable ────────────────────
             wait_msg = bot.send_message(uid, _LT(uid, 'login_checking'))
             ok, cookie_str, nickname, unique_id = _try_tt_login(username, password)
 
