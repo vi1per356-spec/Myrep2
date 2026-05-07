@@ -1633,8 +1633,10 @@ async def callback_handler(event):
     elif data == b"back_to_main":
         await show_start_menu(chat_id)
     elif data == b"back_to_accounts":
-        # Повертаємось на manage-сторінку, з якої зайшли (а не у головне меню)
-        await show_back_url_section(chat_id)
+        # Кнопка back на manage-сторінці завжди веде на рівень вище (top URL menu).
+        # Повернення на manage-сторінку з sub-action — окремий шлях через
+        # show_back_url_section у обробниках стану (post-action).
+        await show_accounts_menu(chat_id)
     elif data == b"delete_account":
         ctx.user_states[chat_id] = "WAITING_DELETE_NUM"
         acc_list = ""
@@ -1728,8 +1730,10 @@ async def callback_handler(event):
     elif data == b"grp_manage_params":
         await show_grp_manage_params_menu(chat_id)
     elif data == b"g_back_to_accounts":
-        # Повертаємось на manage-сторінку групової реклами, з якої зайшли
-        await show_back_grp_section(chat_id)
+        # Кнопка back на manage-сторінці групової реклами завжди веде на рівень
+        # вище (top group menu). Post-action повертається на manage через
+        # show_back_grp_section у обробниках стану.
+        await show_group_accounts_menu(chat_id)
     elif data == b"g_delete_account":
         ctx.user_states[chat_id] = "G_WAITING_DELETE_NUM"
         acc_list = ""
