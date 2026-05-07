@@ -84,7 +84,7 @@ COUNTRIES = [
     "🇦🇺 Австралія",
 ]
 
-# ─── Translations (UK is full; EN/RU map to selected keys, UK fallback) ──────
+# ─── Translations (UK / EN / RU; UK is the fallback) ────────────────────────
 _LX = {
     'uk': {
         # accounts menu
@@ -95,7 +95,7 @@ _LX = {
         'btn_buy_proxy':  "🌍 Купити проксі",
         'btn_proxy':      "🌐 Керувати проксі",
         'btn_del_acc':    "🗑 Видалити акаунти",
-        'btn_params':     "⚙️ Керувати параметрами реклами",
+        'btn_manage_acc': "📱 Керувати акаунтами",
         # cookie input
         'ask_cookie':     ("📋 Надішліть Cookie рядок(и) для TikTok акаунту.\n"
                            "Кожен акаунт — з окремого рядка."),
@@ -127,8 +127,8 @@ _LX = {
                            "• <b>2-4</b> — діапазон\n"
                            "• <b>all</b> — всі проксі"),
         'proxy_not_found':"❌ Проксі не знайдено",
-        # params menu
-        'params_header':  "⚙️ <b>Параметри реклами TikTok</b>",
+        # main (parent) menu
+        'main_header':    "⚙️ <b>Реклама TikTok</b>",
         'p_country':      "🌍 Країна: <b>{v}</b>",
         'p_hashtags':     "🔖 Хештеги: <b>{v}</b>",
         'p_nicks':        "📝 Нікнейми: <b>{v}</b>",
@@ -191,9 +191,87 @@ _LX = {
         'btn_buy_proxy':  "🌍 Buy proxies",
         'btn_proxy':      "🌐 Manage proxies",
         'btn_del_acc':    "🗑 Delete accounts",
-        'btn_params':     "⚙️ Ad parameters",
+        'btn_manage_acc': "📱 Manage accounts",
+        'ask_cookie':     ("📋 Send Cookie string(s) for the TikTok account.\n"
+                           "One account per line."),
+        'checking':       "⏳ Checking account(s)...",
+        'added_ok':       "✅ Added: {n}",
+        'added_fail':     "❌ Failed (check cookie): {n}",
+        'added_dup':      "↩️ Skipped duplicates: {n}",
+        'limit_hit':      "⚠️ {lim} account limit reached",
+        'ask_del_acc':    ("🗑 Enter what to delete:\n"
+                           "• <b>1</b> — single account by number\n"
+                           "• <b>2-5</b> — range\n"
+                           "• <b>all</b> — all accounts"),
+        'del_ok_n':       "✅ Deleted: {n}",
+        'del_range_err':  "❌ Invalid range. Example: 2-5",
+        'acc_not_found':  "❌ Account not found",
+        'proxy_header':   "🌐 <b>SOCKS5 proxies</b>\n\nProxy list (round-robin to accounts):",
+        'no_proxies':     "No proxies added.",
+        'btn_proxy_add':  "➕ Add proxy",
+        'btn_proxy_del':  "🗑 Delete proxy",
+        'ask_proxy_add':  ("🌐 Send SOCKS5 proxies — one per line:\n"
+                           "<code>socks5://host:port</code>\n"
+                           "<code>socks5://user:pass@host:port</code>"),
+        'proxy_added_n':  "✅ Added proxies: {n}",
+        'proxy_invalid_n':"❌ Skipped invalid: {n}",
+        'ask_del_proxy':  ("🗑 Enter which proxies to delete:\n"
+                           "• <b>1</b> — single proxy by number\n"
+                           "• <b>2-4</b> — range\n"
+                           "• <b>all</b> — all proxies"),
+        'proxy_not_found':"❌ Proxy not found",
+        'main_header':    "⚙️ <b>TikTok advertising</b>",
+        'p_country':      "🌍 Country: <b>{v}</b>",
+        'p_hashtags':     "🔖 Hashtags: <b>{v}</b>",
+        'p_nicks':        "📝 Nicknames: <b>{v}</b>",
+        'p_avatars':      "👥 Avatars: <b>{v}</b>",
+        'p_main':         "📕 Main message: <b>{v}</b>",
+        'p_replies':      "📗 Replies: <b>{v}</b>",
+        'p_neuro':        "🖲 Neuro-feed: <b>{v}</b>",
+        'p_state':        "🤔 Bot state: <b>{v}</b>",
+        'on_str':         "✅ Enabled",
+        'off_str':        "⏹ Disabled",
+        'none_str':       "not set",
+        'btn_set_country':"🌍 Select country",
+        'btn_add_hashtag':"➕ Add hashtag",
+        'btn_set_nicks':  "📝 Change nickname",
+        'btn_set_avatar': "👥 Change avatars",
+        'btn_set_main':   "📕 Change main message text",
+        'btn_set_reply':  "📗 Change reply texts",
+        'btn_neuro':      "🖲 Neuro-feed",
+        'btn_state':      "🤔 Bot state",
         'btn_back':       "⬅️ Back",
         'btn_cancel':     "⬅️ Cancel",
+        'country_title':  "🌍 Select country:",
+        'country_set':    "✅ Country set: {v}",
+        'ask_hashtags':   ("🔖 Enter hashtags (without #), separated by comma or new line.\n"
+                           "The bot will monitor new and old videos under them."),
+        'hashtags_set':   "✅ Hashtags: {v}",
+        'ask_nicks':      ("📝 Send up to 25 nicknames — one per line.\n"
+                           "They will be evenly distributed among the accounts."),
+        'nicks_set':      "✅ Nicknames saved: {n}",
+        'ask_avatars':    ("👥 Send a <b>ZIP archive</b> with avatars "
+                           "(PNG/JPG/JPEG/WEBP).\n"
+                           f"~{NO_AVATAR_PCT}% of accounts will remain without an avatar."),
+        'avatars_set':    "✅ Loaded {n} avatars. Randomly assigned to {a} accounts.",
+        'avatars_zip_err':"❌ Could not unpack the ZIP. Check the file.",
+        'avatars_empty':  "❌ The archive contains no supported images.",
+        'ask_main':       ("📕 Enter the main message text.\n"
+                           "It will be posted under each video with a 1.5-min delay "
+                           "between posts; new videos are processed first."),
+        'main_set':       "✅ Main message saved",
+        'ask_reply':      (f"📗 Send up to {REPLY_STYLE_LIMIT} reply styles — "
+                           "each on a <b>new line</b>.\n"
+                           "Each main message will be answered by "
+                           f"{DEFAULT_REPLY_MIN}-{DEFAULT_REPLY_MAX} accounts using random styles."),
+        'reply_set':      "✅ Reply styles saved: {n}",
+        'neuro_on':       "✅ Neuro-feed enabled",
+        'neuro_off':      "⏹ Neuro-feed disabled",
+        'state_on':       "✅ Bot is running — resuming posts",
+        'state_off':      "⏹ Bot stopped",
+        'need_main':      "⚠️ Set the main message first",
+        'need_hashtags':  "⚠️ Add hashtags first",
+        'need_acc':       "⚠️ No active accounts",
     },
     'ru': {
         'acc_header':     "📱 <b>Аккаунты TikTok</b>\n\nСписок аккаунтов:",
@@ -203,9 +281,87 @@ _LX = {
         'btn_buy_proxy':  "🌍 Купить прокси",
         'btn_proxy':      "🌐 Управление прокси",
         'btn_del_acc':    "🗑 Удалить аккаунты",
-        'btn_params':     "⚙️ Параметры рекламы",
+        'btn_manage_acc': "📱 Управление аккаунтами",
+        'ask_cookie':     ("📋 Отправьте Cookie строку(и) для TikTok аккаунта.\n"
+                           "Каждый аккаунт — с новой строки."),
+        'checking':       "⏳ Проверяю аккаунт(ы)...",
+        'added_ok':       "✅ Добавлено: {n}",
+        'added_fail':     "❌ Ошибка (проверьте cookie): {n}",
+        'added_dup':      "↩️ Пропущено дубликатов: {n}",
+        'limit_hit':      "⚠️ Достигнут лимит в {lim} аккаунтов",
+        'ask_del_acc':    ("🗑 Введите, кого удалить:\n"
+                           "• <b>1</b> — один аккаунт по номеру\n"
+                           "• <b>2-5</b> — диапазон\n"
+                           "• <b>all</b> — все аккаунты"),
+        'del_ok_n':       "✅ Удалено: {n}",
+        'del_range_err':  "❌ Неверный диапазон. Пример: 2-5",
+        'acc_not_found':  "❌ Аккаунт не найден",
+        'proxy_header':   "🌐 <b>SOCKS5 прокси</b>\n\nСписок прокси (round-robin к аккаунтам):",
+        'no_proxies':     "Прокси не добавлены.",
+        'btn_proxy_add':  "➕ Добавить прокси",
+        'btn_proxy_del':  "🗑 Удалить прокси",
+        'ask_proxy_add':  ("🌐 Отправьте SOCKS5 прокси — каждый с новой строки:\n"
+                           "<code>socks5://host:port</code>\n"
+                           "<code>socks5://user:pass@host:port</code>"),
+        'proxy_added_n':  "✅ Добавлено прокси: {n}",
+        'proxy_invalid_n':"❌ Пропущено неверных: {n}",
+        'ask_del_proxy':  ("🗑 Введите, какие прокси удалить:\n"
+                           "• <b>1</b> — один прокси по номеру\n"
+                           "• <b>2-4</b> — диапазон\n"
+                           "• <b>all</b> — все прокси"),
+        'proxy_not_found':"❌ Прокси не найден",
+        'main_header':    "⚙️ <b>Реклама TikTok</b>",
+        'p_country':      "🌍 Страна: <b>{v}</b>",
+        'p_hashtags':     "🔖 Хэштеги: <b>{v}</b>",
+        'p_nicks':        "📝 Никнеймы: <b>{v}</b>",
+        'p_avatars':      "👥 Аватарки: <b>{v}</b>",
+        'p_main':         "📕 Основное сообщение: <b>{v}</b>",
+        'p_replies':      "📗 Ответы: <b>{v}</b>",
+        'p_neuro':        "🖲 Нейропросмотр: <b>{v}</b>",
+        'p_state':        "🤔 Статус бота: <b>{v}</b>",
+        'on_str':         "✅ Включено",
+        'off_str':        "⏹ Отключено",
+        'none_str':       "не задано",
+        'btn_set_country':"🌍 Выбрать страну",
+        'btn_add_hashtag':"➕ Добавить хэштег",
+        'btn_set_nicks':  "📝 Изменить Nickname",
+        'btn_set_avatar': "👥 Изменить аватарки",
+        'btn_set_main':   "📕 Изменить текст основного сообщения",
+        'btn_set_reply':  "📗 Изменить текст дополнительных сообщений",
+        'btn_neuro':      "🖲 Нейропросмотр",
+        'btn_state':      "🤔 Статус бота",
         'btn_back':       "⬅️ Назад",
         'btn_cancel':     "⬅️ Отмена",
+        'country_title':  "🌍 Выберите страну:",
+        'country_set':    "✅ Страна установлена: {v}",
+        'ask_hashtags':   ("🔖 Введите хэштеги (без #), через запятую или с новой строки.\n"
+                           "Бот будет мониторить новые и старые видео под ними."),
+        'hashtags_set':   "✅ Хэштеги: {v}",
+        'ask_nicks':      ("📝 Отправьте до 25 никнеймов — каждый с новой строки.\n"
+                           "Они будут равномерно распределены по аккаунтам."),
+        'nicks_set':      "✅ Никнеймов сохранено: {n}",
+        'ask_avatars':    ("👥 Отправьте <b>ZIP-архив</b> с аватарками "
+                           "(PNG/JPG/JPEG/WEBP).\n"
+                           f"~{NO_AVATAR_PCT}% аккаунтов останутся без аватарки."),
+        'avatars_set':    "✅ Загружено {n} аватарок. Назначено случайно на {a} аккаунтов.",
+        'avatars_zip_err':"❌ Не удалось распаковать ZIP. Проверьте файл.",
+        'avatars_empty':  "❌ В архиве нет поддерживаемых изображений.",
+        'ask_main':       ("📕 Введите текст основного сообщения.\n"
+                           "Оно будет отправлено под каждое видео с задержкой 1,5 мин "
+                           "между постами; новые видео обрабатываются первыми."),
+        'main_set':       "✅ Основное сообщение сохранено",
+        'ask_reply':      (f"📗 Отправьте до {REPLY_STYLE_LIMIT} стилей ответов — "
+                           "каждый с <b>новой строки</b>.\n"
+                           "На каждое основное сообщение будут отвечать "
+                           f"{DEFAULT_REPLY_MIN}-{DEFAULT_REPLY_MAX} аккаунтов случайными стилями."),
+        'reply_set':      "✅ Стилей ответов сохранено: {n}",
+        'neuro_on':       "✅ Нейропросмотр включён",
+        'neuro_off':      "⏹ Нейропросмотр отключён",
+        'state_on':       "✅ Бот работает — продолжаю рассылку",
+        'state_off':      "⏹ Бот остановлен",
+        'need_main':      "⚠️ Сначала установите основное сообщение",
+        'need_hashtags':  "⚠️ Сначала добавьте хэштеги",
+        'need_acc':       "⚠️ Нет активных аккаунтов",
     },
 }
 
@@ -875,13 +1031,15 @@ def _build_accounts_text(uid: int) -> str:
 
 
 def _acc_markup(uid: int) -> types.InlineKeyboardMarkup:
+    """Account-management page (level 3) — opened via the «Manage accounts»
+    button on the parent menu."""
     m = types.InlineKeyboardMarkup(row_width=1)
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_cookie'),    callback_data='tt_acc_add'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_proxy'),     callback_data='tt_proxy'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_del_acc'),   callback_data='tt_acc_del'))
-    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_params'),    callback_data='tt_params'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_buy_acc'),   callback_data='r7_buy_acc_tiktok'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_buy_proxy'), callback_data='r7_buy_proxy_tiktok'))
+    # Назад → у parent menu (rukla5 main menu з усіма параметрами)
     m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),         callback_data='m_manage_tiktok'))
     return m
 
@@ -918,7 +1076,7 @@ def _proxy_markup(uid: int) -> types.InlineKeyboardMarkup:
     return m
 
 
-# ── Params menu ──────────────────────────────────────────────────────────────
+# ── Main (parent) menu ───────────────────────────────────────────────────────
 
 def _short(text: str, n: int = 35) -> str:
     if not text:
@@ -926,7 +1084,8 @@ def _short(text: str, n: int = 35) -> str:
     return text if len(text) <= n else text[:n] + '…'
 
 
-def _build_params_text(uid: int) -> str:
+def _build_main_text(uid: int) -> str:
+    """Combined parent menu text — overview + параметри + стан."""
     s = _get_user_settings(uid)
     none = _LT(uid, 'none_str')
 
@@ -941,7 +1100,7 @@ def _build_params_text(uid: int) -> str:
     state    = _LT(uid, 'on_str') if s.get('bot_active', True) else _LT(uid, 'off_str')
 
     return "\n".join([
-        _LT(uid, 'params_header'),
+        _LT(uid, 'main_header'),
         "",
         _LT(uid, 'p_country' ).format(v=country),
         _LT(uid, 'p_hashtags').format(v=_short(hashtags, 60)),
@@ -954,8 +1113,11 @@ def _build_params_text(uid: int) -> str:
     ])
 
 
-def _params_markup(uid: int) -> types.InlineKeyboardMarkup:
+def _main_menu_markup(uid: int) -> types.InlineKeyboardMarkup:
+    """Parent menu (level 2) — об'єднує параметри реклами + кнопку керування
+    акаунтами + back до rukla.py manage-ad menu."""
     m = types.InlineKeyboardMarkup(row_width=1)
+    m.add(types.InlineKeyboardButton(_LT(uid, 'btn_manage_acc'),  callback_data='tt_acc_open'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_country'), callback_data='tt_set_country'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_add_hashtag'), callback_data='tt_set_hashtags'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_nicks'),   callback_data='tt_set_nicks'))
@@ -964,20 +1126,27 @@ def _params_markup(uid: int) -> types.InlineKeyboardMarkup:
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_set_reply'),   callback_data='tt_set_reply'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_neuro'),       callback_data='tt_toggle_neuro'))
     m.add(types.InlineKeyboardButton(_LT(uid, 'btn_state'),       callback_data='tt_toggle_state'))
-    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),           callback_data='tt_acc_open'))
+    # Назад → у головне меню керування рекламою (rukla.py)
+    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'),           callback_data='m_manage_ad'))
     return m
 
 
-def open_params_menu(bot, uid: int, message_id: int) -> None:
+def open_main_menu(bot, uid: int, message_id: int) -> None:
+    """Open the parent TikTok menu (level 2). Called from rukla.py for the
+    `m_manage_tiktok` callback."""
     _load_all()
-    text = _build_params_text(uid)
+    text = _build_main_text(uid)
     try:
         bot.edit_message_text(text, uid, message_id,
-                              reply_markup=_params_markup(uid),
+                              reply_markup=_main_menu_markup(uid),
                               parse_mode='HTML')
     except Exception:
-        bot.send_message(uid, text, reply_markup=_params_markup(uid),
+        bot.send_message(uid, text, reply_markup=_main_menu_markup(uid),
                          parse_mode='HTML')
+
+
+# Backwards-compat alias (rukla.py older versions referenced open_params_menu)
+open_params_menu = open_main_menu
 
 
 def _country_markup(uid: int) -> types.InlineKeyboardMarkup:
@@ -985,7 +1154,7 @@ def _country_markup(uid: int) -> types.InlineKeyboardMarkup:
     btns = [types.InlineKeyboardButton(c, callback_data=f"tt_country_{i}")
             for i, c in enumerate(COUNTRIES)]
     m.add(*btns)
-    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data='tt_params'))
+    m.add(types.InlineKeyboardButton(_T(uid, 'b_back'), callback_data='tt_main'))
     return m
 
 
@@ -1084,12 +1253,13 @@ def register_callbacks(bot):
                          reply_markup=_cancel_markup(uid, 'tt_cancel'),
                          parse_mode='HTML')
 
-    # ── params submenu ────────────────────────────────────────────────────
-    @bot.callback_query_handler(func=lambda c: c.data == 'tt_params')
-    def cb_params(call):
+    # ── parent (main) menu — alias for `m_manage_tiktok` so links from
+    # sub-pages can return to the merged parent.  Both labels are wired in.
+    @bot.callback_query_handler(func=lambda c: c.data in ('tt_main', 'tt_params'))
+    def cb_main(call):
         uid = call.message.chat.id
         bot.answer_callback_query(call.id)
-        open_params_menu(bot, uid, call.message.message_id)
+        open_main_menu(bot, uid, call.message.message_id)
 
     @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_country')
     def cb_set_country(call):
@@ -1116,7 +1286,7 @@ def register_callbacks(bot):
         s['country'] = country
         _save_settings()
         bot.answer_callback_query(call.id, _LT(uid, 'country_set').format(v=country))
-        open_params_menu(bot, uid, call.message.message_id)
+        open_main_menu(bot, uid, call.message.message_id)
 
     @bot.callback_query_handler(func=lambda c: c.data == 'tt_set_hashtags')
     def cb_set_hashtags(call):
@@ -1182,7 +1352,7 @@ def register_callbacks(bot):
             _save_settings()
             _start_neuro_worker(bot, uid)
             bot.answer_callback_query(call.id, _LT(uid, 'neuro_on'))
-        open_params_menu(bot, uid, call.message.message_id)
+        open_main_menu(bot, uid, call.message.message_id)
 
     @bot.callback_query_handler(func=lambda c: c.data == 'tt_toggle_state')
     def cb_toggle_state(call):
@@ -1208,7 +1378,7 @@ def register_callbacks(bot):
             _save_settings()
             _start_bg_worker(bot, uid)
             bot.answer_callback_query(call.id, _LT(uid, 'state_on'))
-        open_params_menu(bot, uid, call.message.message_id)
+        open_main_menu(bot, uid, call.message.message_id)
 
     # ── universal cancel ──────────────────────────────────────────────────
     @bot.callback_query_handler(func=lambda c: c.data == 'tt_cancel')
@@ -1310,7 +1480,6 @@ def _handle_cookie(bot, uid: int, text: str) -> None:
     added = failed = dups = 0
     limit_hit = False
 
-    # Build dedup set: existing cookies AND existing unique_ids
     existing_cookies = {a.get('cookie', '') for a in accs}
     existing_uids    = {a.get('unique_id', '') for a in accs
                         if a.get('unique_id') and a.get('unique_id') != '?'}
@@ -1319,12 +1488,10 @@ def _handle_cookie(bot, uid: int, text: str) -> None:
         if len(accs) >= ACCOUNT_LIMIT:
             limit_hit = True
             break
-        # Dedup by raw cookie
         if cookie in existing_cookies:
             dups += 1
             continue
         valid, nick, uid_ = _get_tt_info(cookie)
-        # Dedup by resolved unique_id
         if uid_ and uid_ != '?' and uid_ in existing_uids:
             dups += 1
             continue
@@ -1438,8 +1605,8 @@ def _handle_hashtags(bot, uid: int, text: str) -> None:
     _save_settings()
     shown = ', '.join(f"#{t}" for t in tags) or '—'
     bot.send_message(uid, _LT(uid, 'hashtags_set').format(v=shown))
-    bot.send_message(uid, _build_params_text(uid),
-                     reply_markup=_params_markup(uid), parse_mode='HTML')
+    bot.send_message(uid, _build_main_text(uid),
+                     reply_markup=_main_menu_markup(uid), parse_mode='HTML')
 
 
 def _handle_nicks(bot, uid: int, text: str) -> None:
@@ -1451,8 +1618,8 @@ def _handle_nicks(bot, uid: int, text: str) -> None:
     _save_settings()
     _distribute_nicknames(uid)
     bot.send_message(uid, _LT(uid, 'nicks_set').format(n=len(nicks)))
-    bot.send_message(uid, _build_params_text(uid),
-                     reply_markup=_params_markup(uid), parse_mode='HTML')
+    bot.send_message(uid, _build_main_text(uid),
+                     reply_markup=_main_menu_markup(uid), parse_mode='HTML')
 
 
 def _handle_main_msg(bot, uid: int, text: str) -> None:
@@ -1461,8 +1628,8 @@ def _handle_main_msg(bot, uid: int, text: str) -> None:
     s['main_message'] = text.strip()
     _save_settings()
     bot.send_message(uid, _LT(uid, 'main_set'))
-    bot.send_message(uid, _build_params_text(uid),
-                     reply_markup=_params_markup(uid), parse_mode='HTML')
+    bot.send_message(uid, _build_main_text(uid),
+                     reply_markup=_main_menu_markup(uid), parse_mode='HTML')
 
 
 def _handle_reply_styles(bot, uid: int, text: str) -> None:
@@ -1473,5 +1640,5 @@ def _handle_reply_styles(bot, uid: int, text: str) -> None:
     s['reply_styles'] = styles
     _save_settings()
     bot.send_message(uid, _LT(uid, 'reply_set').format(n=len(styles)))
-    bot.send_message(uid, _build_params_text(uid),
-                     reply_markup=_params_markup(uid), parse_mode='HTML')
+    bot.send_message(uid, _build_main_text(uid),
+                     reply_markup=_main_menu_markup(uid), parse_mode='HTML')
